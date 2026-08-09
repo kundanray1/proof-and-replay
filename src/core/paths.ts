@@ -15,8 +15,10 @@ export function statePaths(root: string): StatePaths {
     graph: path.join(directory, "graph.json"),
     events: path.join(directory, "events.ndjson"),
     runs: path.join(directory, "runs.json"),
+    sessions: path.join(directory, "sessions.json"),
     claudeActive: path.join(directory, "claude-active.json"),
-    coverage: path.join(directory, "coverage")
+    coverage: path.join(directory, "coverage"),
+    baselines: path.join(directory, "baselines")
   };
 }
 

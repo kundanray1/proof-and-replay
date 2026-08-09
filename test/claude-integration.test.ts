@@ -6,7 +6,7 @@ import { fileURLToPath } from "node:url";
 import { spawnSync } from "node:child_process";
 import test from "node:test";
 import { attachClaude, installClaudeHooks } from "../src/integrations/claude.js";
-import { readEvents } from "../src/core/store.js";
+import { readEvents, readRuns, readSessionRecords } from "../src/core/store.js";
 
 const HOOK = fileURLToPath(new URL("../src/integrations/claude-hook.ts", import.meta.url));
 const TSX_IMPORT = import.meta.resolve("tsx");
@@ -28,7 +28,7 @@ test("Claude installer preserves settings and hook records live activity", () =>
   const installed = installClaudeHooks(root);
   const settings = JSON.parse(fs.readFileSync(installed.settingsFile, "utf8"));
   assert.deepEqual(settings.permissions.allow, ["Bash(npm test)"]);
-  assert.equal(installed.changes, 6);
+  assert.equal(installed.changes, 7);
   assert.equal(installClaudeHooks(root).changes, 0);
 
   const run = attachClaude(root, "Continue fixing the feature");
@@ -50,6 +50,34 @@ test("Claude installer preserves settings and hook records live activity", () =>
   const event = readEvents(root, run.id).find((candidate) => candidate.type === "node.inspected");
   assert.ok(event);
   assert.ok(event.nodeIds.length >= 1);
+});
+
+test("Claude stop finalizes a cycle and a re-prompt starts another cycle in the same session", () => {
+  const root = project();
+  installClaudeHooks(root);
+  const first = attachClaude(root, "First prompt cycle");
+  const stop = spawnSync(process.execPath, ["--import", TSX_IMPORT, HOOK], {
+    cwd: root,
+    input: JSON.stringify({ session_id: "session-cycles", cwd: root, hook_event_name: "Stop" }),
+    encoding: "utf8"
+  });
+  assert.equal(stop.status, 0, stop.stderr);
+  const prompt = spawnSync(process.execPath, ["--import", TSX_IMPORT, HOOK], {
+    cwd: root,
+    input: JSON.stringify({ session_id: "session-cycles", cwd: root, hook_event_name: "UserPromptSubmit", prompt: "Second prompt cycle" }),
+    encoding: "utf8"
+  });
+  assert.equal(prompt.status, 0, prompt.stderr);
+
+  const runs = readRuns(root);
+  const sessions = readSessionRecords(root);
+  assert.equal(runs.length, 2);
+  assert.equal(runs[0]?.id, first.id);
+  assert.equal(runs[0]?.status, "stopped");
+  assert.equal(sessions.length, 1);
+  assert.equal(sessions[0]?.cycles.length, 2);
+  assert.equal(sessions[0]?.cycles[0]?.status, "stopped");
+  assert.equal(sessions[0]?.cycles[1]?.prompt, "Second prompt cycle");
 });
 
 test("Claude hook records agent lanes and exact edit evidence", () => {

@@ -10,7 +10,7 @@ Proof & Replay is a local-first evidence graph for AI-written JavaScript and Typ
 
 ![Animated Proof & Replay dashboard showing a bug-fix run](docs/assets/proof-and-replay-demo.gif)
 
-Status: focused prototype (`0.3.x`). The event schema is versioned; the package API may still evolve before `1.0.0`.
+Status: focused prototype (`0.4.x`). The event and session schemas are versioned; the package API may still evolve before `1.0.0`.
 
 ## Install
 
@@ -68,7 +68,7 @@ Install and attach the hooks from the root being observed:
 npx proof-replay claude attach --prompt "Describe the task Claude is already working on"
 ```
 
-Then enter `/hooks` in the existing Claude Code session and confirm that the Proof & Replay handlers appear. Continue coding normally. New prompts, reads, searches, edits, commands, test results, failures, and stop events are recorded. Events from before attachment cannot be reconstructed.
+Then enter `/hooks` in the existing Claude Code session and confirm that the Proof & Replay handlers appear. Continue coding normally. New prompts, reads, searches, edits, commands, skills, nested agents, test results, failures, and stop events are recorded. Events from before attachment cannot be reconstructed. Re-run the install or attach command after upgrading so Claude loads the `PreToolUse` mutation-baseline hook added in `0.4.0`.
 
 The installer merges handlers into `.claude/settings.local.json` and preserves existing settings. Detach the current task without uninstalling the hooks:
 
@@ -88,6 +88,8 @@ The dashboard separates repository understanding from proof evidence:
 - **Evidence** keeps the append-only timeline and causal completion contract available without making raw commands the primary view.
 
 The canvas is the primary surface. Drag it with a mouse or pointer, use the wheel or a pinch gesture to zoom, and use `Fit` to restore the whole path. The Projects and Details controls hide or reveal compact edge overlays. Selecting a node automatically frames and lights its direct connected nodes and relationship paths, retains a quieter second-hop context, and mutes unrelated graph content. Parameters, return types, data fields, workflow ownership, and recorded changes appear in collision-aware context bubbles; use **Clear focus** or double-click empty canvas space to return to the full map.
+
+Sessions appear as ordered lists of prompt cycles. Each cycle retains its nested prompts, workflows, agents, skill and hook observations, node interactions, token allocation, baseline, and delivery result. Once a cycle stops, use **Touched** to inspect exploration or **Delivered** to isolate surviving changes, verification nodes, and the minimal reference path required to explain the result. See the [session provenance guide](docs/session-provenance.md) for the lifecycle and storage contract.
 
 ### Function execution and changes
 
@@ -151,6 +153,7 @@ The default policy requires all four conditions:
 - Stable graph identities for files and callable symbols
 - V8 coverage mapped back to indexed function and test nodes
 - An append-only NDJSON execution ledger
+- Hierarchical sessions, prompt cycles, workflows, nested agents, prompts, skills, hooks, and node-role delivery snapshots
 - A causally ordered completion policy
 - A React and strict-TypeScript dashboard with mental-model, scenario, route, and evidence views, token monitoring, live updates, zoom, and replay
 - A Claude Code bridge plus a vendor-neutral event command
@@ -216,6 +219,7 @@ The graph is observability. The proof policy is control.
 - [Security policy](SECURITY.md)
 - [Code of conduct](CODE_OF_CONDUCT.md)
 - [Publishing to npm](docs/publishing.md)
+- [Session provenance and workflow contracts](docs/session-provenance.md)
 - [MIT license](LICENSE)
 
 Maintained by **Kundan Ray** · [raykundan57@gmail.com](mailto:raykundan57@gmail.com)

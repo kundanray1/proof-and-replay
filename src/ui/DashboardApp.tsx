@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import type { LedgerEvent, ProofCheck, ProofReplayConfig, ProofResult, ProofRun, RepositoryGraph, RouteDefinition, TokenUsage } from "../types.js";
+import type { LedgerEvent, ProofCheck, ProofReplayConfig, ProofResult, ProofRun, RepositoryGraph, RouteDefinition, SessionRecord, TokenUsage } from "../types.js";
 import { GraphCanvas } from "./components/GraphCanvas.js";
 import type { DisplayNode, GraphMode } from "./components/GraphCanvas.js";
 import { Badge, Button, Panel, PanelHeader, PlayIcon, Select } from "./components/primitives.js";
@@ -10,7 +10,8 @@ const EMPTY_CONFIG: ProofReplayConfig = {
   sourceExtensions: [],
   exclude: [],
   proofPolicy: { requireReproduction: true, requireChange: true, requirePassingVerification: true, requireExecutedChangedNode: true },
-  tokenMonitoring: { sessionWarningTokens: 200_000, turnSpikeTokens: 50_000 }
+  tokenMonitoring: { sessionWarningTokens: 200_000, turnSpikeTokens: 50_000 },
+  workflowContracts: []
 };
 const EMPTY_CHECKS: Array<Pick<ProofCheck, "id" | "label" | "passed">> = [
   { id: "reproduction", label: "Original failure reproduced", passed: false },
@@ -26,7 +27,8 @@ const EVENT_LABELS: Readonly<Record<string, string>> = {
   "verification.failed": "Proof rejected", "task.completed": "Task completed", "task.blocked": "Completion blocked",
   "usage.sampled": "Token usage sampled", "agent.spawned": "Agent spawned", "agent.completed": "Agent completed",
   "agent.failed": "Agent failed", "agent.output": "Agent output", "workflow.task.created": "Workflow task created",
-  "workflow.task.updated": "Workflow task updated", "workflow.task.stopped": "Workflow task stopped"
+  "workflow.task.updated": "Workflow task updated", "workflow.task.stopped": "Workflow task stopped",
+  "hook.invoked": "Hook invoked", "skill.invoked": "Skill invoked", "skill.failed": "Skill failed", "tool.prepared": "Mutation baseline captured"
 };
 
 interface InspectorState {
@@ -139,10 +141,12 @@ export function DashboardApp(): JSX.Element {
   const [graph, setGraph] = useState<RepositoryGraph>(EMPTY_GRAPH);
   const [config, setConfig] = useState<ProofReplayConfig>(EMPTY_CONFIG);
   const [runs, setRuns] = useState<ProofRun[]>([]);
+  const [sessions, setSessions] = useState<SessionRecord[]>([]);
   const [selectedRunId, setSelectedRunId] = useState("");
   const [events, setEvents] = useState<LedgerEvent[]>([]);
   const [proof, setProof] = useState<ProofResult | null>(null);
   const [mode, setMode] = useState<GraphMode>("model");
+  const [traceView, setTraceView] = useState<"exploration" | "delivery">("exploration");
   const [replayCount, setReplayCount] = useState<number | null>(null);
   const [selectedNodeId, setSelectedNodeId] = useState<string | null>(null);
   const [selectedProjectId, setSelectedProjectId] = useState<string | null>(null);
@@ -156,6 +160,9 @@ export function DashboardApp(): JSX.Element {
   const notifiedKey = useRef<string | null>(null);
 
   const run = useMemo(() => runs.find((candidate) => candidate.id === selectedRunId) ?? null, [runs, selectedRunId]);
+  const session = useMemo(() => sessions.find((candidate) => candidate.id === run?.sessionId) ?? sessions.find((candidate) => candidate.cycles.some((cycle) => cycle.runId === selectedRunId)) ?? null, [run?.sessionId, selectedRunId, sessions]);
+  const cycle = useMemo(() => session?.cycles.find((candidate) => candidate.runId === selectedRunId) ?? null, [selectedRunId, session]);
+  const delivery = cycle?.delivery ?? null;
   const visibleEvents = replayCount === null ? events : events.slice(0, replayCount);
   const replaying = replayCount !== null;
   const replayCompleted = visibleEvents.some((event) => event.type === "task.completed");
@@ -171,12 +178,17 @@ export function DashboardApp(): JSX.Element {
   const usagePercent = usage ? Math.min(100, (usage.totalTokens / warningThreshold) * 100) : 0;
 
   useEffect(() => {
+    setTraceView(delivery ? "delivery" : "exploration");
+  }, [delivery, selectedRunId]);
+
+  useEffect(() => {
     let cancelled = false;
-    Promise.all([fetchJson<RepositoryGraph>("/api/graph"), fetchJson<ProofRun[]>("/api/runs"), fetchJson<ProofReplayConfig>("/api/config")]).then(([nextGraph, nextRuns, nextConfig]) => {
+    Promise.all([fetchJson<RepositoryGraph>("/api/graph"), fetchJson<ProofRun[]>("/api/runs"), fetchJson<ProofReplayConfig>("/api/config"), fetchJson<SessionRecord[]>("/api/sessions")]).then(([nextGraph, nextRuns, nextConfig, nextSessions]) => {
       if (cancelled) return;
       setGraph(nextGraph);
       setRuns(nextRuns);
       setConfig(nextConfig);
+      setSessions(nextSessions);
       setSelectedRunId((current) => current || nextRuns[0]?.id || "");
     }).catch((reason: unknown) => { if (!cancelled) setError(reason instanceof Error ? reason.message : String(reason)); });
     return () => { cancelled = true; };
@@ -196,21 +208,37 @@ export function DashboardApp(): JSX.Element {
     const onProofEvent = (message: MessageEvent<string>): void => {
       const event = JSON.parse(message.data) as LedgerEvent;
       setEvents((current) => current.some((item) => item.id === event.id) ? current : [...current, event]);
-      const requests: [Promise<ProofRun[]>, Promise<ProofResult>, Promise<RepositoryGraph> | null] = [
+      const requests: [Promise<ProofRun[]>, Promise<ProofResult>, Promise<RepositoryGraph> | null, Promise<SessionRecord[]>] = [
         fetchJson<ProofRun[]>("/api/runs"),
         fetchJson<ProofResult>(`/api/proof?runId=${encodeURIComponent(selectedRunId)}`),
-        event.type === "file.changed" ? fetchJson<RepositoryGraph>("/api/graph") : null
+        event.type === "file.changed" ? fetchJson<RepositoryGraph>("/api/graph") : null,
+        fetchJson<SessionRecord[]>("/api/sessions")
       ];
-      void Promise.all([requests[0], requests[1], requests[2] ?? Promise.resolve(null)]).then(([nextRuns, nextProof, nextGraph]) => {
+      void Promise.all([requests[0], requests[1], requests[2] ?? Promise.resolve(null), requests[3]]).then(([nextRuns, nextProof, nextGraph, nextSessions]) => {
         if (cancelled) return;
         setRuns(nextRuns);
         setProof(nextProof);
+        setSessions(nextSessions);
         if (nextGraph) setGraph(nextGraph);
       });
     };
     stream.addEventListener("proof-event", onProofEvent as EventListener);
     return () => { cancelled = true; stream.removeEventListener("proof-event", onProofEvent as EventListener); stream.close(); };
   }, [selectedRunId]);
+
+  useEffect(() => {
+    const timer = window.setInterval(() => {
+      void Promise.all([fetchJson<ProofRun[]>("/api/runs"), fetchJson<SessionRecord[]>("/api/sessions")]).then(([nextRuns, nextSessions]) => {
+        setRuns(nextRuns);
+        setSessions(nextSessions);
+        if (!run || run.status === "running") return;
+        const currentSession = nextSessions.find((candidate) => candidate.id === run.sessionId);
+        const latestCycle = currentSession?.cycles.at(-1);
+        if (latestCycle && latestCycle.runId !== selectedRunId) setSelectedRunId(latestCycle.runId);
+      }).catch(() => undefined);
+    }, 1_500);
+    return () => window.clearInterval(timer);
+  }, [run, selectedRunId]);
 
   useEffect(() => {
     if (replayCount === null) return;
@@ -252,6 +280,14 @@ export function DashboardApp(): JSX.Element {
     if (window.innerWidth <= 780) setShowDetails(true);
     const sourceId = typeof node.data?.sourceNodeId === "string" ? node.data.sourceNodeId : node.id;
     const source = graph.nodes.find((candidate) => candidate.id === sourceId);
+    const cycleInteractions = cycle?.interactions.filter((interaction) => interaction.nodeId === sourceId) ?? [];
+    const cycleRoles = [...new Set(cycleInteractions.map((interaction) => interaction.role))];
+    const attributedTokens = cycleInteractions.reduce((sum, interaction) => sum + interaction.tokens, 0);
+    const deliveryRole = delivery?.verifiedNodeIds.includes(sourceId) ? "verified delivery"
+      : delivery?.deliveredNodeIds.includes(sourceId) ? "delivered change"
+        : delivery?.referenceNodeIds.includes(sourceId) ? "delivery reference"
+          : delivery?.revertedNodeIds.includes(sourceId) ? "reverted change"
+            : delivery?.unrelatedTouchedNodeIds.includes(sourceId) ? "unrelated exploration" : null;
     const incoming = source ? graph.edges.filter((edge) => edge.target === source.id) : [];
     const outgoing = source ? graph.edges.filter((edge) => edge.source === source.id) : [];
     const inference = source && typeof source.data.inference === "string" ? source.data.inference : undefined;
@@ -276,6 +312,9 @@ export function DashboardApp(): JSX.Element {
         ["Type", node.kind ?? node.kicker], ["Status", node.status],
         ...(node.file ? [["File", node.file] as const] : []), ...(node.line ? [["Line", String(node.line)] as const] : []),
         ...(confidence ? [["Confidence", confidence] as const] : []), ...(source ? [["Incoming", String(incoming.length)] as const, ["Outgoing", String(outgoing.length)] as const] : []),
+        ...(cycleRoles.length > 0 ? [["Cycle roles", cycleRoles.join(" · ")] as const] : []),
+        ...(deliveryRole ? [["Delivery role", deliveryRole] as const] : []),
+        ...(attributedTokens > 0 ? [["Attributed tokens", formatTokens(attributedTokens)] as const] : []),
         ...(parameters.length > 0 ? [["Parameters", parameters.join(", ")] as const] : []),
         ...(source && typeof source.data.returns === "string" ? [["Returns", source.data.returns] as const] : []),
         ...(fields.length > 0 ? [["Fields", fields.slice(0, 8).join(" · ")] as const] : []),
@@ -289,9 +328,9 @@ export function DashboardApp(): JSX.Element {
         ...(typeof node.event?.data.totalTokens === "number" ? [["Agent tokens", formatTokens(node.event.data.totalTokens)] as const] : []),
         ...(node.event ? [["Event", node.event.type] as const] : [])
       ],
-      diff: typeof node.event?.data.diff === "string" ? node.event.data.diff : typeof changed?.data.diff === "string" ? changed.data.diff : undefined
+      diff: typeof node.event?.data.diff === "string" ? node.event.data.diff : typeof changed?.data.diff === "string" ? changed.data.diff : deliveryRole?.includes("deliver") && delivery?.diff ? delivery.diff : undefined
     });
-  }, [graph, visibleEvents]);
+  }, [cycle, delivery, graph, visibleEvents]);
 
   const clearNodeFocus = useCallback((): void => {
     setSelectedNodeId(null);
@@ -355,9 +394,14 @@ export function DashboardApp(): JSX.Element {
       <main className="page">
         {error ? <div className="error-banner" role="alert">Dashboard error: {error}</div> : null}
         <section className="task-summary" aria-labelledby="task-heading">
-          <div><p className="eyebrow">Live agent session</p><h1 id="task-heading">{run?.prompt ?? "Waiting for a recorded task"}</h1><p className="task-summary__meta">{run ? `${run.id} · started ${formatTime(run.createdAt)} · ${displayedRun?.status ?? run.status}` : "Attach an agent session to activate the project model."}</p></div>
+          <div><p className="eyebrow">{session ? `${session.provider} session · cycle ${cycle?.ordinal ?? 1}` : "Live agent session"}</p><h1 id="task-heading">{run?.prompt ?? "Waiting for a recorded task"}</h1><p className="task-summary__meta">{run ? `${run.id} · started ${formatTime(run.createdAt)} · ${displayedRun?.status ?? run.status}` : "Attach an agent session to activate the project model."}</p></div>
           <div className="proof-score" aria-label={`${passedChecks} of ${checks.length} proof checks passed`}><span>{passedChecks}/{checks.length}</span><small>proof checks</small></div>
         </section>
+
+        {sessions.length > 0 ? <section className="session-ledger" aria-label="Recorded agent sessions and prompt cycles">
+          <div className="session-ledger__sessions"><span className="eyebrow">Sessions</span>{sessions.map((item, index) => <button key={item.id} type="button" className={item.id === session?.id ? "is-active" : ""} onClick={() => { const latest = item.cycles.at(-1); if (latest) setSelectedRunId(latest.runId); }}><strong>Session {sessions.length - index}</strong><small>{item.provider} · {item.cycles.length} cycle{item.cycles.length === 1 ? "" : "s"}</small></button>)}</div>
+          {session ? <div className="session-ledger__cycles"><span className="eyebrow">Prompt cycles</span>{session.cycles.map((item) => <button key={item.id} type="button" className={item.runId === selectedRunId ? "is-active" : ""} onClick={() => setSelectedRunId(item.runId)}><span>Cycle {item.ordinal}</span><strong>{truncate(item.prompt, 38)}</strong><small>{item.prompts.length} prompts · {item.agents.length} agents · {item.status}</small></button>)}</div> : null}
+        </section> : null}
 
         <section className={`usage-strip ${usage?.warning ? "usage-strip--warning" : ""}`} aria-label="Agent token usage">
           <div className="usage-strip__summary"><p className="eyebrow">Session tokens</p><strong>{usage ? formatTokens(usage.totalTokens) : "—"}</strong><span>{usage ? `${Math.round(usagePercent)}% of ${formatTokens(warningThreshold)} warning level` : "Waiting for Claude usage evidence"}</span></div>
@@ -374,6 +418,19 @@ export function DashboardApp(): JSX.Element {
         </section>
         {tokenAlarm ? <div className="token-alarm" role="alert"><span aria-hidden="true">!</span><div><strong>{tokenAlarm.title}</strong><p>{tokenAlarm.detail}</p></div><button type="button" aria-label="Dismiss token alert" onClick={() => setTokenAlarm(null)}>×</button></div> : null}
 
+        {cycle ? <section className={`delivery-ledger ${delivery ? "delivery-ledger--final" : ""}`} aria-label="Touched and delivered node comparison">
+          <div><p className="eyebrow">Cycle evidence</p><strong>{delivery ? "Delivery calculated" : "Exploration active"}</strong><small>{cycle.prompts.length} prompts · {cycle.workflows.length} workflows · {cycle.agents.length} agents</small></div>
+          <dl>
+            <div><dt>Touched</dt><dd>{delivery?.touchedNodeIds.length ?? new Set(cycle.interactions.map((item) => item.nodeId)).size}</dd></div>
+            <div><dt>Changed</dt><dd>{delivery?.changedNodeIds.length ?? new Set(cycle.interactions.filter((item) => item.role === "changed").map((item) => item.nodeId)).size}</dd></div>
+            <div><dt>Delivered</dt><dd>{delivery?.deliveredNodeIds.length ?? "—"}</dd></div>
+            <div><dt>References</dt><dd>{delivery?.referenceNodeIds.length ?? "—"}</dd></div>
+            <div><dt>Reverted</dt><dd>{delivery?.revertedNodeIds.length ?? "—"}</dd></div>
+            <div><dt>Unrelated</dt><dd>{delivery?.unrelatedTouchedNodeIds.length ?? "—"}</dd></div>
+          </dl>
+          <div className="delivery-ledger__contract"><span className={delivery?.compliance.missingSkills.length || delivery?.compliance.missingHooks.length ? "is-missed" : ""}>{delivery ? `${delivery.compliance.missingSkills.length + delivery.compliance.missingHooks.length} missed workflow requirements` : `${cycle.skills.length} skills · ${cycle.hooks.length} hooks observed`}</span><small>{delivery ? `${formatTokens(delivery.allocatedTokens)} attributed · ${formatTokens(delivery.unallocatedTokens)} unallocated tokens` : "Final roles are assigned when the prompt cycle stops"}</small></div>
+        </section> : null}
+
         <nav className="view-tabs" aria-label="Repository views">
           {([ ["model", "Mental model"], ["scenario", "Live scenario"], ["routes", `Routes ${routes.length}`], ["proof", "Evidence"] ] as const).map(([value, label]) => <button key={value} type="button" className={mode === value ? "is-active" : ""} onClick={() => setMode(value)}>{label}</button>)}
         </nav>
@@ -389,19 +446,29 @@ export function DashboardApp(): JSX.Element {
               <><PanelHeader eyebrow="Append-only ledger" title="Execution" titleId="navigator-heading" action={<span className="event-count">{visibleEvents.length}</span>} /><ol className="timeline">{[...visibleEvents].reverse().map((event) => <li key={event.id} className={`timeline__item timeline__item--${event.status}`}><button type="button" onClick={() => inspectEvent(event)}><strong>{EVENT_LABELS[event.type] ?? event.type}</strong><span>{formatTime(event.timestamp)} · {truncate(eventDetail(event), 34)}</span></button></li>)}</ol></>
             ) : mode === "routes" ? (
               <><PanelHeader eyebrow="Discovered interface" title={`${filteredRoutes.length} routes`} titleId="navigator-heading" /><div className="route-search"><input value={routeQuery} onChange={(event) => setRouteQuery(event.currentTarget.value)} placeholder="Filter method, path, or file" aria-label="Filter routes" /></div><ol className="route-list">{filteredRoutes.map((route) => <li key={route.id}><button type="button" className={selectedNodeId === route.id ? "is-active" : ""} onClick={() => selectRoute(route)}><span className={`method method--${route.kind}`}>{route.method}</span><strong>{route.path}</strong><small>{route.file}:{route.line}</small></button></li>)}</ol></>
+            ) : mode === "scenario" ? (
+              <><PanelHeader eyebrow="Session structure" title={`Cycle ${cycle?.ordinal ?? 1}`} titleId="navigator-heading" action={<span className="event-count">{cycle?.prompts.length ?? 0}</span>} />
+                <div className="session-hierarchy">
+                  <p className="eyebrow">Prompt lifecycles</p>
+                  {(cycle?.prompts ?? []).map((prompt, index) => <div key={prompt.id} className={`session-hierarchy__row session-hierarchy__row--${prompt.kind}`}><span>{index + 1}</span><div><strong>{truncate(prompt.text, 42)}</strong><small>{prompt.kind} · {prompt.status} · {prompt.deliveredNodeIds.length} delivered nodes</small></div></div>)}
+                  <p className="eyebrow">Workflows and agents</p>
+                  {(cycle?.workflows ?? []).map((workflow) => <div className="session-hierarchy__group" key={workflow.id}><strong>{workflow.name}</strong><small>{workflow.status} · {workflow.invokedSkills.length}/{workflow.expectedSkills.length} skills · {workflow.observedHooks.length}/{workflow.expectedHooks.length} hooks</small></div>)}
+                  {(cycle?.agents ?? []).map((agent) => <div className={`session-hierarchy__group ${agent.parentAgentRunId ? "is-nested" : ""}`} key={agent.id}><strong>{agent.description ?? agent.agentType ?? "Agent"}</strong><small>{agent.status} · {agent.model ?? "model unreported"} · {formatTokens(agent.tokenUsage)} tokens</small></div>)}
+                </div>
+                <div className="scenario-summary"><p className="eyebrow">Mapped or inferred</p><strong>{visibleEvents.filter((event) => eventHasRepositoryContext(event, graph)).length}/{visibleEvents.length}</strong><span>events linked directly to repository nodes or inferred from repository paths in older shell activity.</span></div></>
             ) : (
-              <><PanelHeader eyebrow="Repository map" title="Projects" titleId="navigator-heading" action={<span className="event-count">{projects.length}</span>} /><ol className="project-list">{projects.map((project) => <li key={project.id}><button type="button" className={selectedProjectId === project.id ? "is-active" : ""} onClick={() => selectProject(project.path === "." ? null : project.id)}><strong>{project.name}</strong><span>{project.kind} · {project.frameworks.join(" + ") || "TypeScript / JavaScript"}</span><small>{project.stats.files} files · {project.stats.functions} functions · {project.stats.routes} routes · {project.stats.dataModels ?? 0} models</small></button></li>)}</ol>{mode === "scenario" ? <div className="scenario-summary"><p className="eyebrow">Mapped or inferred</p><strong>{visibleEvents.filter((event) => eventHasRepositoryContext(event, graph)).length}/{visibleEvents.length}</strong><span>events linked directly to repository nodes or inferred from repository paths in older shell activity.</span></div> : null}</>
+              <><PanelHeader eyebrow="Repository map" title="Projects" titleId="navigator-heading" action={<span className="event-count">{projects.length}</span>} /><ol className="project-list">{projects.map((project) => <li key={project.id}><button type="button" className={selectedProjectId === project.id ? "is-active" : ""} onClick={() => selectProject(project.path === "." ? null : project.id)}><strong>{project.name}</strong><span>{project.kind} · {project.frameworks.join(" + ") || "TypeScript / JavaScript"}</span><small>{project.stats.files} files · {project.stats.functions} functions · {project.stats.routes} routes · {project.stats.dataModels ?? 0} models</small></button></li>)}</ol></>
             )}
           </Panel>
 
           <Panel className="graph-panel" aria-labelledby="graph-heading">
             <div className="graph-toolbar">
               <div><p className="eyebrow">{mode === "model" ? "System architecture" : mode === "scenario" ? "Activated path" : mode === "routes" ? "Interface map" : "Completion contract"}</p><h2 id="graph-heading">{mode === "model" ? (selectedProjectId ? "Project mental model" : "Whole-project mental model") : mode === "scenario" ? "Live project scenario" : mode === "routes" ? "Routes and handlers" : "Proof graph"}</h2></div>
-              <div className="canvas-panels" aria-label="Canvas panels"><button type="button" className={showNavigator ? "is-active" : ""} onClick={() => setShowNavigator((value) => !value)}>Projects</button><button type="button" className={showDetails ? "is-active" : ""} onClick={() => setShowDetails((value) => !value)}>Details</button></div>
+              <div className="canvas-panels" aria-label="Canvas panels"><button type="button" className={showNavigator ? "is-active" : ""} onClick={() => setShowNavigator((value) => !value)}>{mode === "scenario" ? "Session" : "Projects"}</button><button type="button" className={showDetails ? "is-active" : ""} onClick={() => setShowDetails((value) => !value)}>Details</button>{delivery ? <><button type="button" className={traceView === "exploration" ? "is-active" : ""} onClick={() => setTraceView("exploration")}>Touched</button><button type="button" className={traceView === "delivery" ? "is-active" : ""} onClick={() => setTraceView("delivery")}>Delivered</button></> : null}</div>
               {selectedProjectId ? <Button variant="ghost" size="small" onClick={() => selectProject(null)}>← Whole repository</Button> : null}
               <Button variant="secondary" size="small" busy={replaying} leadingIcon={<PlayIcon />} onClick={() => { setMode("scenario"); setReplayCount(0); }} disabled={events.length === 0}>{replaying ? "Replaying" : "Replay run"}</Button>
             </div>
-            <GraphCanvas mode={mode} graph={graph} events={visibleEvents} selectedNodeId={selectedNodeId} selectedProjectId={selectedProjectId} onSelectNode={inspectNode} onOpenNode={openNode} onClearSelection={clearNodeFocus} />
+            <GraphCanvas mode={mode} graph={graph} events={visibleEvents} selectedNodeId={selectedNodeId} selectedProjectId={selectedProjectId} onSelectNode={inspectNode} onOpenNode={openNode} onClearSelection={clearNodeFocus} delivery={delivery} traceView={traceView} />
             <div className="legend" aria-label="Graph status legend">{(["planned", "active", "passed", "changed", "failed"] as const).map((status) => <span key={status}><i className={`legend__dot legend__dot--${status}`} />{status === "passed" ? "Verified" : status}</span>)}<span className="legend__hint">Double-click a project or route to expand it</span></div>
           </Panel>
 

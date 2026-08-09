@@ -3,7 +3,7 @@ import http from "node:http";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { evaluateProof } from "./core/proof.js";
-import { ensureState, getRun, readConfig, readEvents, readGraph, readRuns } from "./core/store.js";
+import { ensureState, getRun, readConfig, readEvents, readGraph, readRuns, readSessionRecords } from "./core/store.js";
 import type { Server } from "node:http";
 import type { ServerResponse } from "node:http";
 
@@ -106,6 +106,20 @@ export function createDashboardServer(
       }
       if (url.pathname === "/api/runs") {
         sendJson(response, 200, readRuns(root).toReversed());
+        return;
+      }
+      if (url.pathname === "/api/sessions") {
+        sendJson(response, 200, readSessionRecords(root).toReversed());
+        return;
+      }
+      if (url.pathname === "/api/session") {
+        const sessionId = url.searchParams.get("id");
+        const session = readSessionRecords(root).find((candidate) => candidate.id === sessionId);
+        if (!session) {
+          sendJson(response, 404, { error: "Unknown session" });
+          return;
+        }
+        sendJson(response, 200, session);
         return;
       }
       if (url.pathname === "/api/events") {

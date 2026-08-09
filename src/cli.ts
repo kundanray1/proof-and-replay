@@ -3,10 +3,11 @@
 import fs from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
-import { appendEvent, createRun, ensureState, getRun, readEvents, readGraph, resetState } from "./core/store.js";
+import { appendEvent, createRun, ensureState, getRun, readEvents, readGraph, readSessionRecords, resetState } from "./core/store.js";
 import { scanProject } from "./core/scanner.js";
 import { runTests } from "./core/coverage.js";
 import { finishRun } from "./core/proof.js";
+import { captureFileBaseline } from "./core/sessions.js";
 import { resolveProjectRoot, toProjectPath } from "./core/paths.js";
 import { createDashboardServer } from "./server.js";
 import { attachClaude, detachClaude, installClaudeHooks } from "./integrations/claude.js";
@@ -39,7 +40,7 @@ function positional(args: readonly string[]): string[] {
   for (let index = 0; index < args.length; index += 1) {
     const value = args[index]!;
     if (value === "--") break;
-    if (["--root", "--port", "--prompt", "--run", "--stage", "--type", "--status", "--data", "--summary", "--node"].includes(value)) {
+    if (["--root", "--port", "--prompt", "--run", "--session", "--stage", "--type", "--status", "--data", "--summary", "--node"].includes(value)) {
       index += 1;
       continue;
     }
@@ -79,6 +80,8 @@ Usage:
   proof-replay test --run id --stage reproduce|verify -- <test command>
   proof-replay finish --run id
   proof-replay replay --run id
+  proof-replay sessions
+  proof-replay session --session id
   proof-replay event --run id --type name [--status status] [--data json]
   proof-replay claude install [--root path]
   proof-replay claude attach --prompt "Current task" [--root path]
@@ -135,6 +138,7 @@ async function runDemo(args: readonly string[]): Promise<void> {
   });
 
   const pricingFile = path.join(demoRoot, "src", "pricing.js");
+  captureFileBaseline(demoRoot, run.cycleId, pricingFile);
   const buggySource = fs.readFileSync(pricingFile, "utf8");
   fs.writeFileSync(pricingFile, buggySource.replace("subtotal * 0.95", "subtotal * 0.8"), "utf8");
   scanProject(demoRoot);
@@ -275,6 +279,28 @@ async function main(): Promise<void> {
         const detail = event.data.summary ?? event.data.command ?? "";
         console.log(`${String(event.seq).padStart(4, "0")}  ${event.status.padEnd(8)}  ${event.type.padEnd(24)} ${detail}`);
       }
+      break;
+    }
+
+    case "sessions": {
+      const sessions = readSessionRecords(root).toReversed().map((session) => ({
+        id: session.id,
+        provider: session.provider,
+        status: session.status,
+        startedAt: session.startedAt,
+        cycles: session.cycles.length,
+        prompts: session.cycles.reduce((sum, cycle) => sum + cycle.prompts.length, 0),
+        deliveredNodes: new Set(session.cycles.flatMap((cycle) => cycle.delivery?.deliveredNodeIds ?? [])).size
+      }));
+      console.log(JSON.stringify(sessions, null, 2));
+      break;
+    }
+
+    case "session": {
+      const sessionId = requireOption(args, "--session");
+      const session = readSessionRecords(root).find((candidate) => candidate.id === sessionId);
+      if (!session) throw new Error(`Unknown session: ${sessionId}`);
+      console.log(JSON.stringify(session, null, 2));
       break;
     }
 

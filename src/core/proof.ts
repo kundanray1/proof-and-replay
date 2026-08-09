@@ -1,4 +1,5 @@
 import { appendEvent, getRun, readConfig, readEvents, updateRun } from "./store.js";
+import { closeSession, finalizeSessionCycle } from "./sessions.js";
 import type { LedgerEvent, ProofResult } from "../types.js";
 
 function firstAfter(
@@ -99,5 +100,8 @@ export function finishRun(root: string, runId: string): ProofResult {
     completedAt: new Date().toISOString(),
     proof
   });
+  finalizeSessionCycle(root, runId, readEvents(root, runId), proof.passed ? "completed" : "blocked");
+  const run = getRun(root, runId);
+  if (run) closeSession(root, run.sessionId, "completed");
   return proof;
 }

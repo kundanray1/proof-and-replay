@@ -1,9 +1,10 @@
 import fs from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
-import { createRun, ensureState, getRun, updateRun } from "../core/store.js";
+import { createRun, ensureState, getRun, readEvents, updateRun } from "../core/store.js";
 import { scanProject } from "../core/scanner.js";
 import { statePaths } from "../core/paths.js";
+import { closeSession, finalizeSessionCycle } from "../core/sessions.js";
 import type { ProofRun } from "../types.js";
 
 const MODULE_FILE = fileURLToPath(import.meta.url);
@@ -13,7 +14,7 @@ const HOOK_SCRIPT = fileURLToPath(
   new URL(RUNNING_TYPESCRIPT_SOURCE ? "./claude-hook.ts" : "./claude-hook.js", import.meta.url)
 );
 
-type ClaudeHookEvent = "UserPromptSubmit" | "PostToolUse" | "PostToolUseFailure" | "Stop" | "SubagentStart" | "SubagentStop";
+type ClaudeHookEvent = "UserPromptSubmit" | "PreToolUse" | "PostToolUse" | "PostToolUseFailure" | "Stop" | "SubagentStart" | "SubagentStop";
 
 interface ClaudeHookCommand {
   type: "command";
@@ -35,6 +36,7 @@ interface ClaudeSettings {
 interface ActiveClaudeRun {
   runId: string;
   sessionId: string | null;
+  proofSessionId?: string;
   attachedAt: string;
 }
 
@@ -99,8 +101,9 @@ export function installClaudeHooks(root: string): ClaudeHookInstallation {
 
   const changes = [
     addHook(settings, "UserPromptSubmit"),
-    addHook(settings, "PostToolUse", "Read|Glob|Grep|Edit|Write|Bash|Agent|TaskCreate|TaskUpdate|TaskStop|TaskOutput"),
-    addHook(settings, "PostToolUseFailure", "Bash|Agent|TaskCreate|TaskUpdate|TaskStop|TaskOutput"),
+    addHook(settings, "PreToolUse", "Edit|Write|Bash"),
+    addHook(settings, "PostToolUse", "Read|Glob|Grep|Edit|Write|Bash|Skill|Agent|TaskCreate|TaskUpdate|TaskStop|TaskOutput"),
+    addHook(settings, "PostToolUseFailure", "Bash|Skill|Agent|TaskCreate|TaskUpdate|TaskStop|TaskOutput"),
     addHook(settings, "Stop"),
     addHook(settings, "SubagentStart"),
     addHook(settings, "SubagentStop")
@@ -115,15 +118,26 @@ export function attachClaude(root: string, prompt: string): ProofRun {
   scanProject(root);
   const paths = statePaths(root);
   let run = null;
+  let previousActive: ActiveClaudeRun | null = null;
+  let previousRun: ProofRun | null = null;
   if (fs.existsSync(paths.claudeActive)) {
-    const active = JSON.parse(fs.readFileSync(paths.claudeActive, "utf8")) as ActiveClaudeRun;
-    run = getRun(root, active.runId);
+    previousActive = JSON.parse(fs.readFileSync(paths.claudeActive, "utf8")) as ActiveClaudeRun;
+    run = getRun(root, previousActive.runId);
+    previousRun = run;
     if (run?.status !== "running") run = null;
   }
-  if (!run) run = createRun(root, prompt);
+  if (!run) {
+    const sessionId = previousActive?.proofSessionId ?? previousRun?.sessionId;
+    run = createRun(root, prompt, {
+      provider: "claude",
+      ...(sessionId ? { sessionId } : {}),
+      ...(previousRun ? { parentCycleId: previousRun.cycleId } : {})
+    });
+  }
   writeJsonAtomic(paths.claudeActive, {
     runId: run.id,
     sessionId: null,
+    proofSessionId: run.sessionId,
     attachedAt: new Date().toISOString()
   });
   return run;
@@ -135,8 +149,10 @@ export function detachClaude(root: string): ProofRun | null {
   const active = JSON.parse(fs.readFileSync(paths.claudeActive, "utf8")) as ActiveClaudeRun;
   const run = getRun(root, active.runId);
   if (run?.status === "running") {
+    finalizeSessionCycle(root, run.id, readEvents(root, run.id), "detached");
     updateRun(root, run.id, { status: "detached", completedAt: new Date().toISOString() });
   }
+  if (run) closeSession(root, active.proofSessionId ?? run.sessionId, "detached");
   fs.rmSync(paths.claudeActive);
   return run;
 }

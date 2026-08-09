@@ -3,9 +3,10 @@
 import fs from "node:fs";
 import path from "node:path";
 import { spawnSync } from "node:child_process";
-import { appendEvent, createRun, getRun, readEvents, readGraph } from "../core/store.js";
+import { appendEvent, createRun, getRun, readEvents, readGraph, updateRun } from "../core/store.js";
 import { scanProject } from "../core/scanner.js";
 import { statePaths, toProjectPath } from "../core/paths.js";
+import { bindExternalSession, captureFileBaseline, finalizeSessionCycle, mapDiffToNodes } from "../core/sessions.js";
 import { readConfig } from "../core/store.js";
 import { readClaudeTokenUsage, readClaudeWorkflowActivities, tokenUsageFromToolResponse } from "./token-usage.js";
 import type { ProofRun, RepositoryGraph, TokenUsage } from "../types.js";
@@ -33,6 +34,9 @@ interface ClaudeHookPayload {
     taskId?: string;
     task_id?: string;
     status?: string;
+    skill?: string;
+    name?: string;
+    args?: string;
   };
   error?: unknown;
   duration_ms?: number;
@@ -46,6 +50,7 @@ interface ClaudeHookPayload {
 interface ActiveClaudeRun {
   runId: string;
   sessionId: string | null;
+  proofSessionId?: string;
   attachedAt: string;
 }
 
@@ -69,22 +74,43 @@ function activeRun(root: string, payload: ClaudeHookPayload): ProofRun | null {
   const paths = statePaths(root);
   if (!fs.existsSync(paths.claudeActive)) {
     if (payload.hook_event_name !== "UserPromptSubmit") return null;
-    const run = createRun(root, payload.prompt ?? "Claude coding session");
+    const run = createRun(root, payload.prompt ?? "Claude coding session", { provider: "claude", externalSessionId: payload.session_id ?? null });
     writeJsonAtomic(paths.claudeActive, {
       runId: run.id,
       sessionId: payload.session_id,
+      proofSessionId: run.sessionId,
       attachedAt: new Date().toISOString()
     });
     return run;
   }
 
   const active = JSON.parse(fs.readFileSync(paths.claudeActive, "utf8")) as ActiveClaudeRun;
-  if (active.sessionId && payload.session_id && active.sessionId !== payload.session_id) return null;
+  if (active.sessionId && payload.session_id && active.sessionId !== payload.session_id) {
+    if (payload.hook_event_name !== "UserPromptSubmit") return null;
+    const next = createRun(root, payload.prompt ?? "Claude coding session", { provider: "claude", externalSessionId: payload.session_id });
+    writeJsonAtomic(paths.claudeActive, { runId: next.id, sessionId: payload.session_id, proofSessionId: next.sessionId, attachedAt: new Date().toISOString() });
+    return next;
+  }
   if (!active.sessionId && payload.session_id) {
     active.sessionId = payload.session_id;
+    if (active.proofSessionId) bindExternalSession(root, active.proofSessionId, payload.session_id);
     writeJsonAtomic(paths.claudeActive, active);
   }
-  const run = getRun(root, active.runId);
+  let run = getRun(root, active.runId);
+  const cycleStopped = run ? readEvents(root, run.id).some((event) => event.type === "agent.stopped") : false;
+  if (payload.hook_event_name === "UserPromptSubmit" && (!run || run.status !== "running" || cycleStopped)) {
+    const sessionId = active.proofSessionId ?? run?.sessionId;
+    const next = createRun(root, payload.prompt ?? "Continue Claude coding session", {
+      provider: "claude",
+      ...(sessionId ? { sessionId } : {}),
+      externalSessionId: payload.session_id ?? active.sessionId,
+      parentCycleId: run?.cycleId ?? null
+    });
+    active.runId = next.id;
+    active.proofSessionId = next.sessionId;
+    writeJsonAtomic(paths.claudeActive, active);
+    run = next;
+  }
   return run?.status === "running" ? run : null;
 }
 
@@ -124,22 +150,28 @@ function looksLikeTest(command = ""): boolean {
 }
 
 function looksLikeMutation(command: string): boolean {
-  return /(?:apply_patch|sed\s+(?:-[^\s]*i|--in-place)|perl\s+-[^\s]*i|(?:cat|tee)\s+[^\n]*(?:>|--append)|writeFile|appendFile|renameSync|copyFile)/i.test(command);
+  return /(?:apply_patch|sed\s+(?:-[^\s]*i|--in-place)|perl\s+-[^\s]*i|(?:cat|tee)\s+[^\n]*(?:>|--append)|(?:^|\s)rm\s+|writeFile|appendFile|renameSync|copyFile|unlinkSync|truncateSync)/i.test(command);
 }
 
 function limited(value: string, limit = 24_000): string {
   return value.length > limit ? `${value.slice(0, limit)}\n… diff truncated by Proof & Replay` : value;
 }
 
-function editDiff(file: string, input: ClaudeHookPayload["tool_input"]): string | null {
+function editDiff(root: string, file: string, input: ClaudeHookPayload["tool_input"]): string | null {
   if (typeof input?.old_string === "string" && typeof input.new_string === "string") {
+    const sourceFile = path.join(root, file);
+    const source = fs.existsSync(sourceFile) ? fs.readFileSync(sourceFile, "utf8") : "";
+    const index = source.indexOf(input.new_string);
+    const newStart = index < 0 ? 1 : source.slice(0, index).split("\n").length;
+    const oldCount = Math.max(1, input.old_string.split("\n").length);
+    const newCount = Math.max(1, input.new_string.split("\n").length);
     const removed = input.old_string.split("\n").map((line) => `-${line}`).join("\n");
     const added = input.new_string.split("\n").map((line) => `+${line}`).join("\n");
-    return limited(`--- a/${file}\n+++ b/${file}\n@@ Claude Edit @@\n${removed}\n${added}`);
+    return limited(`--- a/${file}\n+++ b/${file}\n@@ -${newStart},${oldCount} +${newStart},${newCount} @@\n${removed}\n${added}`);
   }
   if (typeof input?.content === "string") {
     const added = input.content.split("\n").slice(0, 240).map((line) => `+${line}`).join("\n");
-    return limited(`--- /dev/null\n+++ b/${file}\n@@ Claude Write @@\n${added}`);
+    return limited(`--- /dev/null\n+++ b/${file}\n@@ -0,0 +1,${Math.max(1, input.content.split("\n").length)} @@\n${added}`);
   }
   return null;
 }
@@ -211,6 +243,27 @@ function record(root: string, run: ProofRun, payload: ClaudeHookPayload): void {
   const eventName = payload.hook_event_name;
   const tool = payload.tool_name;
   const input = payload.tool_input ?? {};
+  appendEvent(root, {
+    runId: run.id,
+    type: "hook.invoked",
+    status: "observed",
+    data: { hook: eventName ?? "unknown", tool, sessionId: payload.session_id, agentId: payload.agent_id }
+  });
+
+  if (eventName === "PreToolUse") {
+    if (tool && ["Edit", "Write"].includes(tool) && input.file_path) captureFileBaseline(root, run.cycleId, path.resolve(root, input.file_path));
+    if (tool === "Bash" && looksLikeMutation(input.command ?? "")) {
+      const graph = readGraph(root) ?? scanProject(root);
+      for (const file of commandNodes(root, input.command ?? "", graph).files) captureFileBaseline(root, run.cycleId, path.join(root, file));
+    }
+    appendEvent(root, {
+      runId: run.id,
+      type: "tool.prepared",
+      status: "planned",
+      data: { tool, toolUseId: payload.tool_use_id, file: input.file_path, command: input.command }
+    });
+    return;
+  }
   recordTokenUsage(root, run, payload);
   recordTranscriptWorkflow(root, run, payload);
 
@@ -247,6 +300,10 @@ function record(root: string, run: ProofRun, payload: ClaudeHookPayload): void {
       status: "observed",
       data: { sessionId: payload.session_id }
     });
+    scanProject(root);
+    const events = readEvents(root, run.id);
+    finalizeSessionCycle(root, run.id, events, "stopped");
+    updateRun(root, run.id, { status: "stopped", completedAt: new Date().toISOString() });
     return;
   }
 
@@ -265,13 +322,14 @@ function record(root: string, run: ProofRun, payload: ClaudeHookPayload): void {
   if (tool && ["Edit", "Write"].includes(tool)) {
     const file = input.file_path;
     const relativeFile = file ? toProjectPath(root, path.resolve(root, file)) : null;
-    const diff = relativeFile ? editDiff(relativeFile, input) : null;
+    const diff = relativeFile ? editDiff(root, relativeFile, input) : null;
     scanProject(root);
+    const fallbackNodeIds = nodesForFile(root, file);
     appendEvent(root, {
       runId: run.id,
       type: "file.changed",
       status: "changed",
-      nodeIds: nodesForFile(root, file),
+      nodeIds: diff ? mapDiffToNodes(root, diff, fallbackNodeIds) : fallbackNodeIds,
       data: {
         files: relativeFile ? [relativeFile] : [],
         tool,
@@ -279,6 +337,16 @@ function record(root: string, run: ProofRun, payload: ClaudeHookPayload): void {
         toolUseId: payload.tool_use_id,
         diff
       }
+    });
+    return;
+  }
+
+  if (tool === "Skill") {
+    appendEvent(root, {
+      runId: run.id,
+      type: eventName === "PostToolUseFailure" ? "skill.failed" : "skill.invoked",
+      status: eventName === "PostToolUseFailure" ? "failed" : "completed",
+      data: { skill: input.skill ?? input.name ?? "unknown-skill", args: input.args, toolUseId: payload.tool_use_id }
     });
     return;
   }
@@ -350,18 +418,20 @@ function record(root: string, run: ProofRun, payload: ClaudeHookPayload): void {
     });
     if (!failed && mapped.files.length > 0 && looksLikeMutation(command)) {
       scanProject(root);
+      const diff = workingTreeDiff(root, mapped.files);
+      const fallbackNodeIds = [...new Set([...mapped.nodeIds, ...mapped.files.flatMap((file) => nodesForFile(root, file))])];
       appendEvent(root, {
         runId: run.id,
         type: "file.changed",
         status: "changed",
-        nodeIds: mapped.files.flatMap((file) => nodesForFile(root, file)),
+        nodeIds: diff ? mapDiffToNodes(root, diff, fallbackNodeIds) : fallbackNodeIds,
         data: {
           files: mapped.files,
           tool,
           capturedBy: "claude-hook-command",
           laneId: payload.agent_id ?? payload.session_id,
           toolUseId: payload.tool_use_id,
-          diff: workingTreeDiff(root, mapped.files)
+          diff
         }
       });
     }

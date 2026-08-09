@@ -46,7 +46,7 @@ For later releases:
 1. Update the version in `package.json` and `package-lock.json`.
 2. Move changelog entries from `Unreleased` into the new version.
 3. Merge the release commit into `main`.
-4. Create and publish a matching GitHub release such as `v0.3.1`.
+4. Create and publish a matching GitHub release such as `v0.4.0`.
 5. Confirm the `Publish to npm` workflow completed and inspect the provenance link on npmjs.com.
 
 The version is immutable after publication. Never reuse or overwrite an existing npm version.

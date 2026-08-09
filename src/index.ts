@@ -10,14 +10,18 @@ export {
   readEvents,
   readGraph,
   readRuns,
+  readSessionRecords,
   resetState,
   updateRun,
   writeGraph
 } from "./core/store.js";
+export type { CreateRunOptions } from "./core/store.js";
+export { captureFileBaseline, closeSession, cycleForRun, finalizeSessionCycle, repositorySnapshot } from "./core/sessions.js";
 export { attachClaude, detachClaude, installClaudeHooks } from "./integrations/claude.js";
 export { createDashboardServer } from "./server.js";
 export type {
   AppendEventInput,
+  AgentRunRecord,
   ArchitectureModel,
   ConfidenceLevel,
   EventStatus,
@@ -25,19 +29,36 @@ export type {
   GraphNode,
   LedgerEvent,
   LedgerEventData,
+  DeliverySnapshot,
+  EvidenceConfidence,
+  HookInvocationRecord,
+  LifecycleStatus,
+  NodeDeliveryRole,
+  NodeInteraction,
   NodeKind,
   ProjectKind,
   ProjectRelationship,
   ProjectSummary,
+  PromptCycleRecord,
+  PromptCycleStatus,
+  PromptLifecycle,
   ProofCheck,
   ProofPolicy,
   ProofReplayConfig,
   ProofResult,
   ProofRun,
   RepositoryGraph,
+  RepositorySnapshot,
   RouteDefinition,
   RouteKind,
+  SessionRecord,
+  SessionStatus,
+  SkillInvocationRecord,
   StatePaths,
+  TokenAttributionKind,
   TokenMonitoringConfig,
-  TokenUsage
+  TokenUsage,
+  WorkflowCompliance,
+  WorkflowContract,
+  WorkflowRunRecord
 } from "./types.js";

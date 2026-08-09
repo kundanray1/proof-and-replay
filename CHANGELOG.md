@@ -8,6 +8,23 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 No unreleased changes.
 
+## [0.4.0] - 2026-08-09
+
+### Added
+
+- Persistent session records containing ordered prompt cycles, nested prompt lifecycles, workflow runs, main and nested agent runs, skill invocations, hook invocations, and node interactions.
+- Cycle baselines captured before Claude Edit, Write, and recognizable shell mutations, allowing final delivery to distinguish surviving changes from reverted exploration.
+- Delivery snapshots classifying touched, changed, delivered, verified, required-reference, reverted, and unrelated nodes with explicit evidence reasons.
+- Per-interaction token allocation marked separately from observed agent-level totals, plus unallocated-token accounting.
+- Configurable workflow contracts for required skills and hooks with completion-time missing-step detection.
+- Session and prompt-cycle APIs, CLI inspection commands, legacy-run migration, session/cycle selectors, hierarchy navigation, and touched-versus-delivered dashboard views.
+
+### Changed
+
+- Claude `Stop` finalizes the active prompt cycle; the next user prompt starts another cycle in the same provider session.
+- The Claude installer now captures `PreToolUse` mutation baselines and `Skill` tool outcomes in addition to existing lifecycle evidence.
+- Completed cycles default to a delivery-focused graph while retaining the full exploration graph as a toggle.
+
 ## [0.3.1] - 2026-08-09
 
 ### Added
@@ -68,7 +85,8 @@ No unreleased changes.
 - Vendor-neutral event command and programmatic package API.
 - Demonstration project, generic multi-monorepo integration guide, automated tests, and CI.
 
-[Unreleased]: https://github.com/kundanray1/proof-and-replay/compare/v0.3.1...HEAD
+[Unreleased]: https://github.com/kundanray1/proof-and-replay/compare/v0.4.0...HEAD
+[0.4.0]: https://github.com/kundanray1/proof-and-replay/compare/v0.3.1...v0.4.0
 [0.3.1]: https://github.com/kundanray1/proof-and-replay/compare/v0.3.0...v0.3.1
 [0.3.0]: https://github.com/kundanray1/proof-and-replay/compare/v0.2.0...v0.3.0
 [0.2.0]: https://github.com/kundanray1/proof-and-replay/compare/v0.1.0...v0.2.0

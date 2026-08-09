@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import type { KeyboardEvent, PointerEvent as ReactPointerEvent, WheelEvent as ReactWheelEvent } from "react";
-import type { EventStatus, GraphEdge, GraphNode, LedgerEvent, NodeKind, RepositoryGraph } from "../../types.js";
+import type { DeliverySnapshot, EventStatus, GraphEdge, GraphNode, LedgerEvent, NodeKind, RepositoryGraph } from "../../types.js";
 import { EmptyState } from "./primitives.js";
 
 export type GraphMode = "model" | "scenario" | "routes" | "proof";
@@ -24,6 +24,7 @@ export interface PositionedNode extends DisplayNode {
 }
 
 export interface DisplayEdge {
+  id?: string;
   source: string;
   target: string;
   kind: string;
@@ -70,6 +71,8 @@ export interface GraphCanvasProps {
   onSelectNode: (node: DisplayNode) => void;
   onOpenNode: (node: DisplayNode) => void;
   onClearSelection: () => void;
+  delivery: DeliverySnapshot | null;
+  traceView: "exploration" | "delivery";
 }
 
 const NODE_WIDTH = 210;
@@ -134,6 +137,7 @@ function edgeLabel(edge: GraphEdge): string {
 
 function displayEdge(edge: GraphEdge, statuses: ReadonlyMap<string, EventStatus>): DisplayEdge {
   return {
+    id: edge.id,
     source: edge.source,
     target: edge.target,
     kind: edge.kind,
@@ -190,7 +194,7 @@ function proofGraph(events: readonly LedgerEvent[]): DisplayGraph {
   return { nodes, edges: nodes.slice(1).map((node, index) => ({ source: nodes[index]!.id, target: node.id, kind: "causes", label: "then", active: Boolean(node.event) })) };
 }
 
-function modelGraph(graph: RepositoryGraph, events: readonly LedgerEvent[], selectedProjectId: string | null): DisplayGraph {
+function modelGraph(graph: RepositoryGraph, events: readonly LedgerEvent[], selectedProjectId: string | null, delivery: DeliverySnapshot | null): DisplayGraph {
   const statuses = eventStatuses(graph, events);
   const architecture = graph.architecture;
   if (!architecture) return { nodes: [], edges: [] };
@@ -210,7 +214,8 @@ function modelGraph(graph: RepositoryGraph, events: readonly LedgerEvent[], sele
   if (!project) return { nodes: [], edges: [] };
   const owned = graph.nodes.filter((node) => node.id !== project.id && node.data.projectId === project.id);
   const routeIds = new Set(architecture.routes.filter((route) => route.projectId === project.id).map((route) => route.id));
-  const activeIds = new Set([...statuses.keys()]);
+  const deliveryIds = new Set(delivery?.pathNodeIds ?? []);
+  const activeIds = new Set([...statuses.keys(), ...deliveryIds]);
   const connected = new Set<string>([project.id, ...routeIds, ...project.entryNodeIds, ...activeIds]);
   for (const edge of graph.edges) {
     if (connected.has(edge.source) || connected.has(edge.target)) {
@@ -229,6 +234,7 @@ function modelGraph(graph: RepositoryGraph, events: readonly LedgerEvent[], sele
       if (items.filter((candidate) => selectedIds.has(candidate.id)).length >= count) break;
     }
   };
+  take(eligible.filter((node) => deliveryIds.has(node.id)), 24);
   take(eligible.filter((node) => activeIds.has(node.id)), 10);
   take(eligible.filter((node) => node.kind === "route"), 14);
   take(eligible.filter((node) => node.kind === "data"), 12);
@@ -242,6 +248,11 @@ function modelGraph(graph: RepositoryGraph, events: readonly LedgerEvent[], sele
     nodes: sourceNodes.map((node) => asDisplayNode(node, statuses)),
     edges: graph.edges.filter((edge) => allowed.has(edge.source) && allowed.has(edge.target)).map((edge) => displayEdge(edge, statuses))
   };
+}
+
+function traceNodeIds(node: PositionedNode): string[] {
+  const sourceId = typeof node.data?.sourceNodeId === "string" ? node.data.sourceNodeId : null;
+  return [...new Set([node.id, ...(sourceId ? [sourceId] : []), ...(node.event?.nodeIds ?? [])])];
 }
 
 function routesGraph(graph: RepositoryGraph, events: readonly LedgerEvent[], selectedProjectId: string | null, selectedNodeId: string | null): DisplayGraph {
@@ -278,7 +289,8 @@ function eventVerb(event: LedgerEvent): string {
     "agent.spawned": "Agent spawned", "agent.completed": "Agent completed", "agent.failed": "Agent failed",
     "workflow.task.created": "Task created", "workflow.task.updated": "Task updated", "workflow.task.stopped": "Task stopped", "file.changed": "Code changed",
     "test.completed": "Tests completed", "node.inspected": "Code inspected", "task.started": "Task started",
-    "agent.prompted": "Agent prompted", "tool.failed": "Command failed", "tool.completed": "Command ran"
+    "agent.prompted": "Agent prompted", "tool.failed": "Command failed", "tool.completed": "Command ran",
+    "skill.invoked": "Skill invoked", "skill.failed": "Skill failed"
   };
   return labels[event.type] ?? event.type.replaceAll(".", " ");
 }
@@ -290,7 +302,7 @@ function eventLane(event: LedgerEvent): string {
 }
 
 function scenarioGraph(graph: RepositoryGraph, events: readonly LedgerEvent[], selectedProjectId: string | null): DisplayGraph {
-  const ignored = new Set(["usage.sampled", "agent.stopped"]);
+  const ignored = new Set(["usage.sampled", "agent.stopped", "hook.invoked", "tool.prepared"]);
   const candidates = events.filter((event) => !ignored.has(event.type)).flatMap((event): DisplayNode[] => {
     const projectId = eventProject(graph, event);
     if (selectedProjectId && projectId !== selectedProjectId) return [];
@@ -534,7 +546,7 @@ function clamp(value: number, minimum: number, maximum: number): number {
   return Math.min(maximum, Math.max(minimum, value));
 }
 
-export function GraphCanvas({ mode, graph, events, selectedNodeId, selectedProjectId, onSelectNode, onOpenNode, onClearSelection }: GraphCanvasProps): JSX.Element {
+export function GraphCanvas({ mode, graph, events, selectedNodeId, selectedProjectId, onSelectNode, onOpenNode, onClearSelection, delivery, traceView }: GraphCanvasProps): JSX.Element {
   const containerRef = useRef<HTMLDivElement>(null);
   const pointers = useRef(new Map<number, { x: number; y: number }>());
   const gesture = useRef<{ center: { x: number; y: number }; distance: number } | null>(null);
@@ -553,7 +565,7 @@ export function GraphCanvas({ mode, graph, events, selectedNodeId, selectedProje
     return () => observer.disconnect();
   }, []);
 
-  const displayGraph = useMemo(() => mode === "proof" ? proofGraph(events) : mode === "model" ? modelGraph(graph, events, selectedProjectId) : mode === "routes" ? routesGraph(graph, events, selectedProjectId, selectedNodeId) : scenarioGraph(graph, events, selectedProjectId), [events, graph, mode, selectedNodeId, selectedProjectId]);
+  const displayGraph = useMemo(() => mode === "proof" ? proofGraph(events) : mode === "model" ? modelGraph(graph, events, selectedProjectId, delivery) : mode === "routes" ? routesGraph(graph, events, selectedProjectId, selectedNodeId) : scenarioGraph(graph, events, selectedProjectId), [delivery, events, graph, mode, selectedNodeId, selectedProjectId]);
   const nodes = useMemo(() => layoutDisplayGraph(displayGraph, mode, size.width), [displayGraph, mode, size.width]);
   const byId = useMemo(() => new Map(nodes.map((node) => [node.id, node])), [nodes]);
   const selected = selectedNodeId ? byId.get(selectedNodeId) : undefined;
@@ -653,10 +665,17 @@ export function GraphCanvas({ mode, graph, events, selectedNodeId, selectedProje
 
   const lanePositions = new Map((displayGraph.lanes ?? []).map((lane, index) => [lane.id, 125 + index * 165]));
   const hasFocus = Boolean(selected);
+  const deliveryFocus = traceView === "delivery" && Boolean(delivery) && !hasFocus;
+  const deliveredIds = new Set(delivery?.deliveredNodeIds ?? []);
+  const verifiedIds = new Set(delivery?.verifiedNodeIds ?? []);
+  const referenceIds = new Set(delivery?.referenceNodeIds ?? []);
+  const unrelatedIds = new Set(delivery?.unrelatedTouchedNodeIds ?? []);
+  const deliveryEventIds = new Set(delivery?.pathEventIds ?? []);
+  const deliveryEdgeIds = new Set(delivery?.pathEdgeIds ?? []);
   const directlyConnectedCount = Math.max(0, focus.directNodeIds.size - 1);
 
   return (
-    <div className={`graph-canvas ${panning ? "is-panning" : ""} ${hasFocus ? "has-focus" : ""}`} ref={containerRef}>
+    <div className={`graph-canvas ${panning ? "is-panning" : ""} ${hasFocus ? "has-focus" : ""} ${deliveryFocus ? "has-delivery-focus" : ""}`} ref={containerRef}>
       <div className="zoom-controls" aria-label="Graph zoom controls">
         <button type="button" onClick={() => zoomAt(view.scale + 0.2)} aria-label="Zoom in">+</button>
         <button type="button" onClick={() => zoomAt(view.scale - 0.2)} aria-label="Zoom out">−</button>
@@ -670,6 +689,7 @@ export function GraphCanvas({ mode, graph, events, selectedNodeId, selectedProje
         <defs>
           <marker id="graph-arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse"><path d="M 0 0 L 10 5 L 0 10 z" className="graph-arrow" /></marker>
           <marker id="graph-arrow-focus" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M 0 0 L 10 5 L 0 10 z" className="graph-arrow graph-arrow--focus" /></marker>
+          <marker id="graph-arrow-delivery" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M 0 0 L 10 5 L 0 10 z" className="graph-arrow graph-arrow--delivery" /></marker>
         </defs>
         <rect className="graph-hitarea" width={size.width} height={size.height} onDoubleClick={onClearSelection} />
         <g transform={`translate(${view.x} ${view.y}) scale(${view.scale})`}>
@@ -685,11 +705,20 @@ export function GraphCanvas({ mode, graph, events, selectedNodeId, selectedProje
             const id = edgeIdentity(edge);
             const direct = focus.directEdgeIds.has(id);
             const secondary = focus.secondaryEdgeIds.has(id);
-            const focusClass = direct ? "is-focused" : secondary ? "is-secondary" : hasFocus ? "is-muted" : "";
-            return <g key={`${edge.source}:${edge.target}:${index}`} className={`graph-edge-group graph-edge-group--${edge.kind} ${focusClass}`}><path d={routed.path} className={`graph-edge ${edge.active ? "is-active" : ""}`} markerEnd={direct ? "url(#graph-arrow-focus)" : "url(#graph-arrow)"} /><text x={routed.labelX} y={routed.labelY}>{shorten(edge.label, 24)}</text></g>;
+            const sourceDelivery = deliveryEventIds.has(source.event?.id ?? "") || traceNodeIds(source).some((nodeId) => deliveredIds.has(nodeId) || verifiedIds.has(nodeId) || referenceIds.has(nodeId));
+            const targetDelivery = deliveryEventIds.has(target.event?.id ?? "") || traceNodeIds(target).some((nodeId) => deliveredIds.has(nodeId) || verifiedIds.has(nodeId) || referenceIds.has(nodeId));
+            const deliveryPath = deliveryFocus && (deliveryEdgeIds.has(edge.id ?? "") || (sourceDelivery && targetDelivery));
+            const focusClass = direct ? "is-focused" : secondary ? "is-secondary" : hasFocus ? "is-muted" : deliveryPath ? "is-delivery" : deliveryFocus ? "is-muted" : "";
+            return <g key={`${edge.source}:${edge.target}:${index}`} className={`graph-edge-group graph-edge-group--${edge.kind} ${focusClass}`}><path d={routed.path} className={`graph-edge ${edge.active ? "is-active" : ""}`} markerEnd={direct ? "url(#graph-arrow-focus)" : deliveryPath ? "url(#graph-arrow-delivery)" : "url(#graph-arrow)"} /><text x={routed.labelX} y={routed.labelY}>{shorten(edge.label, 24)}</text></g>;
           })}
           {nodes.map((node) => {
-            const focusClass = selectedNodeId === node.id ? "is-selected" : focus.directNodeIds.has(node.id) ? "is-related" : focus.secondaryNodeIds.has(node.id) ? "is-secondary" : hasFocus ? "is-muted" : "";
+            const nodeIds = traceNodeIds(node);
+            const eventDelivered = deliveryEventIds.has(node.event?.id ?? "");
+            const deliveryClass = nodeIds.some((id) => verifiedIds.has(id)) ? "is-verified-delivery"
+              : nodeIds.some((id) => deliveredIds.has(id)) || eventDelivered ? "is-delivered"
+                : nodeIds.some((id) => referenceIds.has(id)) ? "is-delivery-reference"
+                  : nodeIds.some((id) => unrelatedIds.has(id)) ? "is-unrelated-touch" : "is-muted";
+            const focusClass = selectedNodeId === node.id ? "is-selected" : focus.directNodeIds.has(node.id) ? "is-related" : focus.secondaryNodeIds.has(node.id) ? "is-secondary" : hasFocus ? "is-muted" : deliveryFocus ? deliveryClass : "";
             return <g key={node.id} transform={`translate(${node.x - NODE_WIDTH / 2} ${node.y - NODE_HEIGHT / 2})`} className={`graph-node graph-node--${node.status} graph-node--kind-${node.kind ?? "evidence"} ${focusClass}`} role="button" tabIndex={0} aria-label={`${node.label}, ${node.status}`} onPointerDown={(event) => event.stopPropagation()} onClick={() => onSelectNode(node)} onDoubleClick={() => onOpenNode(node)} onKeyDown={(event) => activateWithKeyboard(event, () => onSelectNode(node))}>
               <rect width={NODE_WIDTH} height={NODE_HEIGHT} rx="14" />
               <circle className="graph-node__status" cx="18" cy="20" r="5" />
