@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import {
+  connectedExecutionPath,
   connectedNeighborhood,
   countNodeCollisions,
   lifecycleEvidence,
@@ -30,6 +31,28 @@ test("selection focuses direct and second-hop relationships without unrelated no
   assert.equal(focus.directEdgeIds.size, 1);
   assert.equal(focus.secondaryEdgeIds.size, 1);
   assert.equal(focus.directNodeIds.has("other"), false);
+});
+
+test("scenario selection retains the complete directed path as new nodes are appended", () => {
+  const original: DisplayEdge[] = [
+    { source: "cycle", target: "prompt", kind: "prompts", label: "starts" },
+    { source: "prompt", target: "agent", kind: "runs", label: "agent" },
+    { source: "agent", target: "step-1", kind: "acts", label: "acts" },
+    { source: "agent", target: "sibling", kind: "delegates", label: "delegates" },
+    { source: "unrelated", target: "isolated", kind: "calls", label: "calls" }
+  ];
+  const appended = [
+    ...original,
+    { source: "step-1", target: "step-2", kind: "next", label: "next" },
+    { source: "step-2", target: "delivered", kind: "delivers", label: "delivers" }
+  ];
+
+  const focus = connectedExecutionPath(appended, "step-1");
+
+  assert.deepEqual([...focus.directNodeIds].sort(), ["agent", "cycle", "delivered", "prompt", "step-1", "step-2"]);
+  assert.equal(focus.directEdgeIds.size, 5);
+  assert.equal(focus.directNodeIds.has("sibling"), false);
+  assert.equal(focus.directNodeIds.has("unrelated"), false);
 });
 
 test("dense architecture bands remain collision free", () => {

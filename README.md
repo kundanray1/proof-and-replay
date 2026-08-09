@@ -8,7 +8,7 @@ Proof & Replay is a local-first evidence graph for AI-written JavaScript and Typ
 
 > Can we prove that an agent reproduced a bug, changed the relevant code, executed that code again, and passed verification—in the correct order?
 
-![Animated Proof & Replay dashboard showing a bug-fix run](docs/assets/proof-and-replay-demo.gif)
+![Animated Proof & Replay dashboard showing the repository model, complete agent path, delivered nodes, and recorded code diff](docs/assets/proof-and-replay-demo.gif)
 
 Status: focused prototype (`0.4.x`). The event and session schemas are versioned; the package API may still evolve before `1.0.0`.
 

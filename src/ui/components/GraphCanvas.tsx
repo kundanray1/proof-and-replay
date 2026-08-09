@@ -258,6 +258,41 @@ export function connectedNeighborhood(edges: readonly DisplayEdge[], selectedNod
   return { directNodeIds, secondaryNodeIds, directEdgeIds, secondaryEdgeIds };
 }
 
+export function connectedExecutionPath(edges: readonly DisplayEdge[], selectedNodeId: string | null): GraphFocus {
+  const directNodeIds = new Set<string>();
+  const directEdgeIds = new Set<string>();
+  const secondaryNodeIds = new Set<string>();
+  const secondaryEdgeIds = new Set<string>();
+  if (!selectedNodeId) return { directNodeIds, secondaryNodeIds, directEdgeIds, secondaryEdgeIds };
+
+  directNodeIds.add(selectedNodeId);
+  const visit = (direction: "ancestors" | "descendants"): void => {
+    const pending = [selectedNodeId];
+    const visited = new Set<string>(pending);
+    while (pending.length > 0) {
+      const current = pending.pop()!;
+      for (const edge of edges) {
+        const matches = direction === "ancestors" ? edge.target === current : edge.source === current;
+        if (!matches) continue;
+        const next = direction === "ancestors" ? edge.source : edge.target;
+        directNodeIds.add(edge.source);
+        directNodeIds.add(edge.target);
+        directEdgeIds.add(edgeIdentity(edge));
+        if (visited.has(next)) continue;
+        visited.add(next);
+        pending.push(next);
+      }
+    }
+  };
+
+  visit("ancestors");
+  visit("descendants");
+  for (const edge of edges) {
+    if (directNodeIds.has(edge.source) && directNodeIds.has(edge.target)) directEdgeIds.add(edgeIdentity(edge));
+  }
+  return { directNodeIds, secondaryNodeIds, directEdgeIds, secondaryEdgeIds };
+}
+
 function proofGraph(events: readonly LedgerEvent[]): DisplayGraph {
   const started = firstEvent(events, "task.started");
   const reproduction = firstEvent(events, "test.completed", (event) => event.data.stage === "reproduce");
@@ -794,7 +829,9 @@ export function GraphCanvas({ mode, graph, events, selectedNodeId, selectedProje
   const nodes = useMemo(() => layoutDisplayGraph(displayGraph, mode, size.width), [displayGraph, mode, size.width]);
   const byId = useMemo(() => new Map(nodes.map((node) => [node.id, node])), [nodes]);
   const selected = selectedNodeId ? byId.get(selectedNodeId) : undefined;
-  const focus = useMemo(() => connectedNeighborhood(displayGraph.edges, selected?.id ?? null), [displayGraph.edges, selected?.id]);
+  const focus = useMemo(() => mode === "scenario"
+    ? connectedExecutionPath(displayGraph.edges, selected?.id ?? null)
+    : connectedNeighborhood(displayGraph.edges, selected?.id ?? null), [displayGraph.edges, mode, selected?.id]);
   const bubbles = useMemo(() => contextBubbles(selected, graph), [graph, selected]);
   const positionedBubbles = useMemo(() => positionContextBubbles(selected, nodes, bubbles), [bubbles, nodes, selected]);
   const contentBounds = useMemo(() => bounds(nodes), [nodes]);
@@ -911,7 +948,7 @@ export function GraphCanvas({ mode, graph, events, selectedNodeId, selectedProje
         <span>{Math.round(view.scale * 100)}%</span>
       </div>
       {hasFocus ? <div className="graph-focus-summary"><span>{directlyConnectedCount} connected</span><button type="button" onClick={onClearSelection}>Clear focus</button></div> : null}
-      <div className="canvas-help">Drag to pan · wheel or pinch to zoom · select to trace relationships</div>
+      <div className="canvas-help">Drag to pan · wheel or pinch to zoom · select to trace the complete execution path</div>
       <svg viewBox={`0 0 ${size.width} ${size.height}`} role="img" aria-labelledby="graph-heading graph-description" onWheel={onWheel} onPointerDown={onPointerDown} onPointerMove={onPointerMove} onPointerUp={onPointerEnd} onPointerCancel={onPointerEnd}>
         <desc id="graph-description">Interactive repository architecture and workflow trace. Drag to pan and use the wheel or pinch gesture to zoom.</desc>
         <defs>

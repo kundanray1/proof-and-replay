@@ -6,7 +6,9 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ## [Unreleased]
 
-No unreleased changes.
+### Changed
+
+- Scenario selection now highlights the complete directed execution path from its cycle and prompt ancestors through every newly appended descendant, while unrelated sibling branches remain muted.
 
 ## [0.4.1] - 2026-08-09
 
