@@ -1,4 +1,4 @@
-export type NodeKind = "project" | "route" | "file" | "function" | "test";
+export type NodeKind = "project" | "route" | "file" | "function" | "data" | "test";
 
 export type ConfidenceLevel = "high" | "medium" | "low";
 
@@ -32,7 +32,7 @@ export interface GraphEdge {
   id: string;
   source: string;
   target: string;
-  kind: "calls" | "contains" | "depends-on" | "handles" | "imports" | "requests";
+  kind: "calls" | "contains" | "depends-on" | "handles" | "imports" | "requests" | "uses-data";
   data: Record<string, unknown>;
 }
 
@@ -50,6 +50,7 @@ export interface ProjectSummary {
     functions: number;
     tests: number;
     routes: number;
+    dataModels: number;
   };
 }
 
@@ -111,6 +112,7 @@ export interface RepositoryGraph {
     edges: number;
     projects?: number;
     routes?: number;
+    dataModels?: number;
   };
 }
 

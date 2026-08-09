@@ -10,7 +10,7 @@ Proof & Replay is a local-first evidence graph for AI-written JavaScript and Typ
 
 ![Animated Proof & Replay dashboard showing a bug-fix run](docs/assets/proof-and-replay-demo.gif)
 
-Status: focused prototype (`0.2.x`). The event schema is versioned; the package API may still evolve before `1.0.0`.
+Status: focused prototype (`0.3.x`). The event schema is versioned; the package API may still evolve before `1.0.0`.
 
 ## Install
 
@@ -82,16 +82,22 @@ Claude's normal test commands are observed, including Playwright and Cypress. Sh
 
 The dashboard separates repository understanding from proof evidence:
 
-- **Mental model** shows package boundaries, frameworks, file/function counts, routes, and cross-project imports. Double-click a project to expand its files, routes, functions, and active neighbors.
-- **Live scenario** turns the current agent ledger into a project-level path. Repeated operations are grouped and older shell events are inferred from paths when direct node IDs are unavailable.
-- **Routes** lists every discovered Express endpoint, middleware mount, and React Router page. Select a route to focus its handler and downstream calls.
+- **Mental model** shows package boundaries, frameworks, routes, files, functions, data models, and cross-project imports. Double-click a project to expand a balanced map of its active code and interfaces.
+- **Live scenario** places the main agent and spawned workers in horizontal workflow lanes. Claude transcript metadata can reconstruct earlier spawns, while future lifecycle hooks update the lanes live.
+- **Routes** lists every discovered Express endpoint, middleware mount, and React Router page. Select a route to focus its handler, downstream calls, argument expressions, and referenced data models.
 - **Evidence** keeps the append-only timeline and causal completion contract available without making raw commands the primary view.
 
-Use the project chips to scope any map. The `+`, `−`, and `Fit` controls zoom the graph; selecting a node centers it, and double-clicking a project or route expands that context.
+The canvas is the primary surface. Drag it with a mouse or pointer, use the wheel or a pinch gesture to zoom, and use `Fit` to restore the whole path. The Projects and Details controls hide or reveal compact edge overlays. Selecting a node opens relationship bubbles around it for callers, callees, parameters, return types, data models, workflow ownership, and recorded changes.
+
+### Function execution and changes
+
+The static graph records declared parameter signatures and the argument expressions at conservatively resolved call sites. Tests run through `proof-replay test` add V8-observed execution counts for functions and tests. Claude Edit and Write operations record bounded local diffs; recognizable shell mutations attach the current Git diff when a referenced file can be resolved.
+
+Runtime argument **values** and exact call ordering are not inferred from source code. Capturing those requires explicit application instrumentation and is intentionally not claimed by this prototype. The UI distinguishes static relationships from observed execution evidence.
 
 ## Token alerts
 
-Proof & Replay reads Claude Code's local transcript metadata and records usage totals only; it does not send prompts or usage data to an external service. The dashboard always displays the last observed totals. Browser notifications are disabled by default and can be requested only by clicking **Enable token alerts**.
+Proof & Replay reads Claude Code's local transcript metadata and records usage totals only; it does not send prompts or usage data to an external service. The dashboard always displays the last observed totals. Browser notifications are disabled by default and can be requested only by clicking **Enable token alerts**. If permission is granted after a run has already crossed its threshold, the current level triggers immediately. A persistent in-app alarm remains visible when the operating system suppresses native notifications, and **Test alert** verifies delivery on demand.
 
 Default warning levels are `200000` processed session tokens or a `50000`-token increase between samples. Adjust them in `.proof-replay/config.json`:
 
@@ -140,7 +146,7 @@ The default policy requires all four conditions:
 
 ## What is included
 
-- A TypeScript AST index of JavaScript and TypeScript projects, routes, files, functions, tests, imports, and conservatively resolvable calls
+- A TypeScript AST index of JavaScript and TypeScript projects, routes, files, functions, data models, tests, imports, and conservatively resolvable calls
 - Inspectable confidence and evidence for inferred calls and route handlers
 - Stable graph identities for files and callable symbols
 - V8 coverage mapped back to indexed function and test nodes

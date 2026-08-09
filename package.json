@@ -1,6 +1,6 @@
 {
   "name": "proof-and-replay",
-  "version": "0.2.0",
+  "version": "0.3.0",
   "description": "A local-first evidence graph and replay ledger for AI-written code.",
   "type": "module",
   "main": "./dist/index.js",

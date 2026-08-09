@@ -38,6 +38,11 @@ export interface RunTestsResult {
   coverageDirectory: string;
 }
 
+export interface FunctionExecutionCount {
+  nodeId: string;
+  count: number;
+}
+
 function coverageFiles(directory: string): string[] {
   if (!fs.existsSync(directory)) return [];
   return fs.readdirSync(directory)
@@ -54,11 +59,11 @@ function scriptPath(url: string): string | null {
   return path.isAbsolute(url) ? url : null;
 }
 
-export function collectExecutedNodes(
+export function collectExecutionCounts(
   root: string,
   directory: string,
   graph: RepositoryGraph | null = readGraph(root)
-): string[] {
+): FunctionExecutionCount[] {
   if (!graph) return [];
   const executedRanges = new Map<string, V8CoverageRange[]>();
 
@@ -84,16 +89,26 @@ export function collectExecutedNodes(
 
   return graph.nodes
     .filter((node) => node.kind === "function" || node.kind === "test")
-    .filter((node) => {
+    .map((node): FunctionExecutionCount | null => {
       const ranges = executedRanges.get(node.file) ?? [];
-      return ranges.some((range) => {
+      const matches = ranges.filter((range) => {
         const startDelta = Math.abs(range.startOffset - node.start);
         const containsStart = range.startOffset <= node.start && range.endOffset >= node.start;
         const comparableSize = range.endOffset - range.startOffset <= node.end - node.start + 120;
         return startDelta <= 24 || (containsStart && comparableSize);
       });
+      if (matches.length === 0) return null;
+      return { nodeId: node.id, count: matches.reduce((total, range) => total + range.count, 0) };
     })
-    .map((node) => node.id);
+    .filter((item): item is FunctionExecutionCount => item !== null);
+}
+
+export function collectExecutedNodes(
+  root: string,
+  directory: string,
+  graph: RepositoryGraph | null = readGraph(root)
+): string[] {
+  return collectExecutionCounts(root, directory, graph).map((item) => item.nodeId);
 }
 
 export async function runTests(root: string, options: RunTestsOptions): Promise<RunTestsResult> {
@@ -120,13 +135,14 @@ export async function runTests(root: string, options: RunTestsOptions): Promise<
     child.once("exit", (code, signal) => resolve(code ?? (signal ? 1 : 0)));
   });
 
-  const nodeIds = collectExecutedNodes(root, directory);
+  const executions = collectExecutionCounts(root, directory);
+  const nodeIds = executions.map((item) => item.nodeId);
   appendEvent(root, {
     runId: options.runId,
     type: "node.executed",
     status: "observed",
     nodeIds,
-    data: { count: nodeIds.length, stage: options.stage }
+    data: { count: nodeIds.length, executions, stage: options.stage }
   });
   appendEvent(root, {
     runId: options.runId,

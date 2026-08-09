@@ -33,7 +33,7 @@ test("scanner builds file, function, test, import, and call relationships", () =
   assert.ok(graph.nodes.some((node) => node.label === "twice"));
   assert.ok(graph.nodes.some((node) => node.label === "doubles"));
   assert.ok(graph.edges.some((edge) => edge.kind === "imports"));
-  assert.ok(graph.edges.some((edge) => edge.kind === "calls"));
+  assert.ok(graph.edges.some((edge) => edge.kind === "calls" && Array.isArray(edge.data.arguments) && edge.data.arguments.join(",") === "n,n"));
 });
 
 test("scanner discovers monorepo projects, HTTP routes, pages, and handlers", () => {
@@ -45,7 +45,7 @@ test("scanner discovers monorepo projects, HTTP routes, pages, and handlers", ()
   fs.writeFileSync(path.join(root, "frontend", "package.json"), JSON.stringify({ name: "web", dependencies: { react: "latest", "react-router-dom": "latest" } }));
   fs.writeFileSync(
     path.join(root, "backend", "src", "server.ts"),
-    "function listUsers() { return []; }\nrouter.get('/users', listUsers);\n"
+    "interface User { id: string; name: string }\nfunction listUsers(limit: number): User[] { return []; }\nrouter.get('/users', listUsers);\nrouter.get('/health', (_request, response) => response.json({ ok: true }));\n"
   );
   fs.writeFileSync(
     path.join(root, "frontend", "src", "App.tsx"),
@@ -55,9 +55,13 @@ test("scanner discovers monorepo projects, HTTP routes, pages, and handlers", ()
 
   const graph = scanProject(root);
   assert.equal(graph.stats.projects, 3);
-  assert.equal(graph.stats.routes, 2);
+  assert.equal(graph.stats.routes, 3);
   assert.ok(graph.architecture?.projects.some((project) => project.name === "api" && project.kind === "service"));
   assert.ok(graph.architecture?.routes.some((route) => route.method === "GET" && route.path === "/users"));
   assert.ok(graph.architecture?.routes.some((route) => route.method === "PAGE" && route.path === "/settings"));
   assert.ok(graph.edges.some((edge) => edge.kind === "handles" && edge.data.confidence === "high"));
+  assert.ok(graph.nodes.some((node) => node.kind === "data" && node.label === "User"));
+  assert.ok(graph.nodes.some((node) => node.kind === "function" && node.label === "GET /health handler"));
+  assert.ok(graph.edges.some((edge) => edge.kind === "uses-data"));
+  assert.deepEqual(graph.nodes.find((node) => node.label === "listUsers")?.data.parameters, ["limit: number"]);
 });

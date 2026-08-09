@@ -31,6 +31,8 @@ interface CallReference {
   source: GraphNode;
   name: string;
   file: string;
+  arguments: string[];
+  expression: string;
 }
 
 interface ImportReference {
@@ -216,7 +218,14 @@ function callableName(node: CallableNode, sourceFile: ts.SourceFile): string {
   if (ts.isVariableDeclaration(node.parent)) return propertyName(node.parent.name, sourceFile);
   if (ts.isPropertyAssignment(node.parent)) return propertyName(node.parent.name, sourceFile);
   if (ts.isBinaryExpression(node.parent)) return node.parent.left.getText(sourceFile);
-  return "anonymous";
+  if (ts.isCallExpression(node.parent)) {
+    const expression = node.parent.expression.getText(sourceFile);
+    const method = ts.isPropertyAccessExpression(node.parent.expression) ? node.parent.expression.name.text.toUpperCase() : expression;
+    const routePath = stringValue(node.parent.arguments[0]);
+    if ((HTTP_METHODS.has(method.toLowerCase()) || method === "USE") && routePath) return `${method} ${routePath} handler`;
+    return `${expression} callback`;
+  }
+  return `${path.basename(sourceFile.fileName)}:${lineOf(sourceFile, node.getStart(sourceFile))} callback`;
 }
 
 function isCallable(node: ts.Node): node is CallableNode {
@@ -259,6 +268,52 @@ function expressionName(node: ts.Expression, sourceFile: ts.SourceFile): string 
   if (ts.isIdentifier(node)) return node.text;
   if (ts.isPropertyAccessExpression(node)) return node.name.text;
   if (ts.isArrowFunction(node) || ts.isFunctionExpression(node)) return callableName(node, sourceFile);
+  return null;
+}
+
+function callableSignature(node: CallableNode, sourceFile: ts.SourceFile): {
+  parameters: string[];
+  parameterNames: string[];
+  returns: string | null;
+  typeReferences: string[];
+} {
+  const parameters = node.parameters.map((parameter) => parameter.getText(sourceFile));
+  const parameterNames = node.parameters.map((parameter) => propertyName(parameter.name, sourceFile));
+  const returns = "type" in node && node.type ? node.type.getText(sourceFile) : null;
+  const typeText = [...node.parameters.map((parameter) => parameter.type?.getText(sourceFile) ?? ""), returns ?? ""].join(" ");
+  const typeReferences = [...new Set(typeText.match(/\b[A-Z][A-Za-z0-9_$]*\b/g) ?? [])];
+  return { parameters, parameterNames, returns, typeReferences };
+}
+
+function dataModel(node: ts.Node, sourceFile: ts.SourceFile): { name: string; modelKind: string; fields: string[]; definition: string } | null {
+  if (ts.isInterfaceDeclaration(node)) return {
+    name: node.name.text,
+    modelKind: "interface",
+    fields: node.members.map((member) => member.getText(sourceFile).replace(/\s+/g, " ").slice(0, 120)),
+    definition: node.getText(sourceFile).replace(/\s+/g, " ").slice(0, 500)
+  };
+  if (ts.isTypeAliasDeclaration(node)) return {
+    name: node.name.text,
+    modelKind: "type",
+    fields: ts.isTypeLiteralNode(node.type) ? node.type.members.map((member) => member.getText(sourceFile).replace(/\s+/g, " ").slice(0, 120)) : [],
+    definition: node.type.getText(sourceFile).replace(/\s+/g, " ").slice(0, 500)
+  };
+  if (ts.isEnumDeclaration(node)) return {
+    name: node.name.text,
+    modelKind: "enum",
+    fields: node.members.map((member) => member.name.getText(sourceFile)),
+    definition: node.getText(sourceFile).replace(/\s+/g, " ").slice(0, 500)
+  };
+  if (ts.isClassDeclaration(node) && node.name) {
+    const fields = node.members.filter(ts.isPropertyDeclaration).map((member) => member.getText(sourceFile).replace(/\s+/g, " ").slice(0, 120));
+    if (fields.length > 0) return { name: node.name.text, modelKind: "class", fields, definition: node.getText(sourceFile).replace(/\s+/g, " ").slice(0, 500) };
+  }
+  if (ts.isVariableDeclaration(node) && ts.isIdentifier(node.name) && node.initializer) {
+    const initializer = node.initializer.getText(sourceFile);
+    if (/(?:\bz\.object\s*\(|\bnew\s+(?:mongoose\.)?Schema\s*\(|\bSchema\s*\(|\bcreateSchema\s*\()/i.test(initializer)) {
+      return { name: node.name.text, modelKind: "schema", fields: [], definition: initializer.replace(/\s+/g, " ").slice(0, 500) };
+    }
+  }
   return null;
 }
 
@@ -328,6 +383,7 @@ export function scanProject(root: string): RepositoryGraph {
   const imports: ImportReference[] = [];
   const routes: RouteReference[] = [];
   const callableByName = new Map<string, GraphNode[]>();
+  const dataByName = new Map<string, GraphNode[]>();
   const fileIds = new Map<string, string>();
   const projectByFile = new Map<string, ProjectDescriptor>();
 
@@ -381,15 +437,45 @@ export function scanProject(root: string): RepositoryGraph {
       const name = labelOverride ?? (isCallable(node) ? callableName(node, sourceFile) : "anonymous");
       const start = node.getStart(sourceFile);
       const id = stableId(kind, relativeFile, String(start), name);
+      const signature = isCallable(node) ? callableSignature(node, sourceFile) : { parameters: [], parameterNames: [], returns: null, typeReferences: [] };
       const item: GraphNode = {
         id, kind, label: name, file: relativeFile, line: lineOf(sourceFile, start), start, end: node.end,
-        data: { name, displayPath: `${relativeFile}:${lineOf(sourceFile, start)}`, projectId: project.id }
+        data: {
+          name,
+          displayPath: `${relativeFile}:${lineOf(sourceFile, start)}`,
+          projectId: project.id,
+          parameters: signature.parameters,
+          parameterNames: signature.parameterNames,
+          returns: signature.returns,
+          typeReferences: signature.typeReferences,
+          async: isCallable(node) && Boolean(node.modifiers?.some((modifier) => modifier.kind === ts.SyntaxKind.AsyncKeyword))
+        }
       };
       nodes.push(item);
       addEdge(edges, edgeKeys, fileId, id, "contains", { confidence: "high", inference: "Declared in file" });
       const simple = name.split(".").at(-1) ?? name;
       if (!callableByName.has(simple)) callableByName.set(simple, []);
       callableByName.get(simple)!.push(item);
+      return item;
+    }
+
+    function registerDataModel(syntaxNode: ts.Node, model: NonNullable<ReturnType<typeof dataModel>>): GraphNode {
+      const start = syntaxNode.getStart(sourceFile);
+      const id = stableId("data", relativeFile, String(start), model.name);
+      const item: GraphNode = {
+        id,
+        kind: "data",
+        label: model.name,
+        file: relativeFile,
+        line: lineOf(sourceFile, start),
+        start,
+        end: syntaxNode.end,
+        data: { ...model, projectId: project.id, displayPath: `${relativeFile}:${lineOf(sourceFile, start)}` }
+      };
+      nodes.push(item);
+      addEdge(edges, edgeKeys, fileId, id, "contains", { confidence: "high", inference: "Data model declared in file" });
+      if (!dataByName.has(model.name)) dataByName.set(model.name, []);
+      dataByName.get(model.name)!.push(item);
       return item;
     }
 
@@ -408,6 +494,8 @@ export function scanProject(root: string): RepositoryGraph {
     }
 
     function visit(node: ts.Node, currentCallable: GraphNode | null = null): void {
+      const model = dataModel(node, sourceFile);
+      if (model) registerDataModel(node, model);
       if (isTestCall(node, sourceFile)) {
         const callback = node.arguments.find((argument) => ts.isArrowFunction(argument) || ts.isFunctionExpression(argument));
         const testNode = registerCallable(callback ?? node, "test", testTitle(node));
@@ -428,7 +516,13 @@ export function scanProject(root: string): RepositoryGraph {
           registerRoute(contextualRoute, node);
         }
         const name = callName(node.expression, sourceFile);
-        if (currentCallable && name && !["test", "it", "describe"].includes(name)) calls.push({ source: currentCallable, name, file: relativeFile });
+        if (currentCallable && name && !["test", "it", "describe"].includes(name)) calls.push({
+          source: currentCallable,
+          name,
+          file: relativeFile,
+          arguments: node.arguments.map((argument) => argument.getText(sourceFile).replace(/\s+/g, " ").slice(0, 160)),
+          expression: node.expression.getText(sourceFile).slice(0, 160)
+        });
         if (ts.isIdentifier(node.expression) && node.expression.text === "require" && node.arguments[0] && ts.isStringLiteral(node.arguments[0])) addImport(node.arguments[0].text);
       }
       if (ts.isJsxSelfClosingElement(node) || ts.isJsxOpeningElement(node)) {
@@ -448,8 +542,23 @@ export function scanProject(root: string): RepositoryGraph {
     const target = sameFile ?? (candidates.length === 1 ? candidates[0] : null);
     if (target) addEdge(edges, edgeKeys, call.source.id, target.id, "calls", {
       confidence: sameFile ? "high" : "medium",
-      inference: sameFile ? "Same-file symbol call" : "Unique matching callable name across repository"
+      inference: sameFile ? "Same-file symbol call" : "Unique matching callable name across repository",
+      expression: call.expression,
+      arguments: call.arguments
     });
+  }
+
+  for (const callable of nodes.filter((node) => node.kind === "function" || node.kind === "test")) {
+    const references = Array.isArray(callable.data.typeReferences) ? callable.data.typeReferences.filter((item): item is string => typeof item === "string") : [];
+    for (const reference of references) {
+      const candidates = dataByName.get(reference) ?? [];
+      const sameFile = candidates.find((candidate) => candidate.file === callable.file);
+      const target = sameFile ?? (candidates.length === 1 ? candidates[0] : null);
+      if (target) addEdge(edges, edgeKeys, callable.id, target.id, "uses-data", {
+        confidence: sameFile ? "high" : "medium",
+        inference: sameFile ? "Function signature references a data model in the same file" : "Function signature references a uniquely named data model"
+      });
+    }
   }
 
   const routeDefinitions: RouteDefinition[] = routes.map((route) => {
@@ -500,7 +609,8 @@ export function scanProject(root: string): RepositoryGraph {
         files: owned.filter((node) => node.kind === "file").length,
         functions: owned.filter((node) => node.kind === "function").length,
         tests: owned.filter((node) => node.kind === "test").length,
-        routes: owned.filter((node) => node.kind === "route").length
+        routes: owned.filter((node) => node.kind === "route").length,
+        dataModels: owned.filter((node) => node.kind === "data").length
       }
     };
   });
@@ -518,7 +628,8 @@ export function scanProject(root: string): RepositoryGraph {
       tests: nodes.filter((node) => node.kind === "test").length,
       edges: edges.length,
       projects: projects.length,
-      routes: routeDefinitions.length
+      routes: routeDefinitions.length,
+      dataModels: nodes.filter((node) => node.kind === "data").length
     }
   };
   writeGraph(root, graph);

@@ -8,6 +8,22 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 No unreleased changes.
 
+## [0.3.0] - 2026-08-09
+
+### Added
+
+- Canvas-first trace explorer with mouse/touch panning, wheel and pinch zoom, fit controls, collapsible edge overlays, labeled relationships, and selected-node context bubbles.
+- TypeScript interfaces, type aliases, enums, classes, and common schema declarations as first-class data-model nodes.
+- Function signatures, parameter declarations, return types, call-site argument expressions, data-model relationships, and V8 execution counts.
+- Horizontal workflow lanes reconstructed from Claude Agent and task transcript metadata, plus hooks for future subagent lifecycle events.
+- Bounded code-diff evidence for Claude Edit, Write, and recognizable shell mutations.
+- Persistent in-app token alarms, catch-up notification delivery after permission is granted, threshold-level deduplication, and an explicit alert test action.
+
+### Changed
+
+- Anonymous callbacks now receive contextual names derived from their call site, including HTTP route handler names.
+- The project and selected-context panels now float at the canvas edges and can be hidden independently.
+
 ## [0.2.0] - 2026-08-09
 
 ### Added
@@ -37,6 +53,7 @@ No unreleased changes.
 - Vendor-neutral event command and programmatic package API.
 - Demonstration project, generic multi-monorepo integration guide, automated tests, and CI.
 
-[Unreleased]: https://github.com/kundanray1/proof-and-replay/compare/v0.2.0...HEAD
+[Unreleased]: https://github.com/kundanray1/proof-and-replay/compare/v0.3.0...HEAD
+[0.3.0]: https://github.com/kundanray1/proof-and-replay/compare/v0.2.0...v0.3.0
 [0.2.0]: https://github.com/kundanray1/proof-and-replay/compare/v0.1.0...v0.2.0
 [0.1.0]: https://github.com/kundanray1/proof-and-replay/releases/tag/v0.1.0

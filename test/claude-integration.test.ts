@@ -28,7 +28,7 @@ test("Claude installer preserves settings and hook records live activity", () =>
   const installed = installClaudeHooks(root);
   const settings = JSON.parse(fs.readFileSync(installed.settingsFile, "utf8"));
   assert.deepEqual(settings.permissions.allow, ["Bash(npm test)"]);
-  assert.equal(installed.changes, 4);
+  assert.equal(installed.changes, 6);
   assert.equal(installClaudeHooks(root).changes, 0);
 
   const run = attachClaude(root, "Continue fixing the feature");
@@ -50,4 +50,45 @@ test("Claude installer preserves settings and hook records live activity", () =>
   const event = readEvents(root, run.id).find((candidate) => candidate.type === "node.inspected");
   assert.ok(event);
   assert.ok(event.nodeIds.length >= 1);
+});
+
+test("Claude hook records agent lanes and exact edit evidence", () => {
+  const root = project();
+  installClaudeHooks(root);
+  const run = attachClaude(root, "Delegate and edit the feature");
+  const agent = spawnSync(process.execPath, ["--import", TSX_IMPORT, HOOK], {
+    cwd: root,
+    input: JSON.stringify({
+      session_id: "main-session",
+      cwd: root,
+      hook_event_name: "PostToolUse",
+      tool_name: "Agent",
+      tool_use_id: "tool-agent-1",
+      tool_input: { description: "Inspect the feature", subagent_type: "Explore", run_in_background: true },
+      tool_response: { agentId: "agent-42", status: "running", resolvedModel: "sonnet" }
+    }),
+    encoding: "utf8"
+  });
+  assert.equal(agent.status, 0);
+
+  const edit = spawnSync(process.execPath, ["--import", TSX_IMPORT, HOOK], {
+    cwd: root,
+    input: JSON.stringify({
+      session_id: "main-session",
+      cwd: root,
+      hook_event_name: "PostToolUse",
+      tool_name: "Edit",
+      tool_use_id: "tool-edit-1",
+      tool_input: { file_path: path.join(root, "src", "feature.js"), old_string: "return true", new_string: "return false" }
+    }),
+    encoding: "utf8"
+  });
+  assert.equal(edit.status, 0);
+
+  const events = readEvents(root, run.id);
+  const spawned = events.find((event) => event.type === "agent.spawned");
+  const changed = events.find((event) => event.type === "file.changed");
+  assert.equal(spawned?.data.laneId, "agent-42");
+  assert.match(String(changed?.data.diff), /-return true/);
+  assert.match(String(changed?.data.diff), /\+return false/);
 });

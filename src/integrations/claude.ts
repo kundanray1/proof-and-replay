@@ -13,7 +13,7 @@ const HOOK_SCRIPT = fileURLToPath(
   new URL(RUNNING_TYPESCRIPT_SOURCE ? "./claude-hook.ts" : "./claude-hook.js", import.meta.url)
 );
 
-type ClaudeHookEvent = "UserPromptSubmit" | "PostToolUse" | "PostToolUseFailure" | "Stop";
+type ClaudeHookEvent = "UserPromptSubmit" | "PostToolUse" | "PostToolUseFailure" | "Stop" | "SubagentStart" | "SubagentStop";
 
 interface ClaudeHookCommand {
   type: "command";
@@ -70,12 +70,18 @@ function addHook(
   settings.hooks ??= {};
   settings.hooks[event] ??= [];
   const command = process.execPath;
-  const alreadyInstalled = settings.hooks[event].some((group) =>
+  const installedGroup = settings.hooks[event].find((group) =>
     group.hooks?.some(
       (hook) => hook.command === command && hook.args?.includes(HOOK_SCRIPT)
     )
   );
-  if (alreadyInstalled) return false;
+  if (installedGroup) {
+    if (matcher && installedGroup.matcher !== matcher) {
+      installedGroup.matcher = matcher;
+      return true;
+    }
+    return false;
+  }
   const group: ClaudeHookGroup = { hooks: [hookHandler()] };
   if (matcher) group.matcher = matcher;
   settings.hooks[event].push(group);
@@ -93,9 +99,11 @@ export function installClaudeHooks(root: string): ClaudeHookInstallation {
 
   const changes = [
     addHook(settings, "UserPromptSubmit"),
-    addHook(settings, "PostToolUse", "Read|Glob|Grep|Edit|Write|Bash"),
-    addHook(settings, "PostToolUseFailure", "Bash"),
-    addHook(settings, "Stop")
+    addHook(settings, "PostToolUse", "Read|Glob|Grep|Edit|Write|Bash|Agent|TaskCreate|TaskUpdate|TaskStop|TaskOutput"),
+    addHook(settings, "PostToolUseFailure", "Bash|Agent|TaskCreate|TaskUpdate|TaskStop|TaskOutput"),
+    addHook(settings, "Stop"),
+    addHook(settings, "SubagentStart"),
+    addHook(settings, "SubagentStop")
   ].filter(Boolean).length;
 
   writeJsonAtomic(settingsFile, settings);
