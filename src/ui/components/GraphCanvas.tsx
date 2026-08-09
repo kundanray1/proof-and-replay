@@ -1,9 +1,19 @@
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import type { KeyboardEvent, PointerEvent as ReactPointerEvent, WheelEvent as ReactWheelEvent } from "react";
-import type { DeliverySnapshot, EventStatus, GraphEdge, GraphNode, LedgerEvent, NodeKind, RepositoryGraph } from "../../types.js";
+import type { DeliverySnapshot, EventStatus, GraphEdge, GraphNode, LedgerEvent, NodeKind, PromptCycleRecord, RepositoryGraph } from "../../types.js";
 import { EmptyState } from "./primitives.js";
 
 export type GraphMode = "model" | "scenario" | "routes" | "proof";
+export type LifecycleKind = "cycle" | "prompt" | "workflow" | "agent";
+
+export interface LifecycleEvidence {
+  eventIds: string[];
+  touchedNodeIds: string[];
+  changedNodeIds: string[];
+  deliveredNodeIds: string[];
+  verifiedNodeIds: string[];
+  tokens: number;
+}
 
 export interface DisplayNode {
   id: string;
@@ -73,6 +83,7 @@ export interface GraphCanvasProps {
   onClearSelection: () => void;
   delivery: DeliverySnapshot | null;
   traceView: "exploration" | "delivery";
+  cycle: PromptCycleRecord | null;
 }
 
 const NODE_WIDTH = 210;
@@ -84,6 +95,77 @@ const MAX_SCALE = 2.8;
 
 function shorten(value: string, limit: number): string {
   return value.length > limit ? `${value.slice(0, limit - 1)}…` : value;
+}
+
+export function lifecycleNodeId(kind: LifecycleKind, id: string): string {
+  return `lifecycle:${kind}:${id}`;
+}
+
+function lifecycleIds(cycle: PromptCycleRecord, kind: LifecycleKind, id: string): { promptIds: Set<string>; workflowIds: Set<string>; agentIds: Set<string> } {
+  if (kind === "cycle") return {
+    promptIds: new Set(cycle.prompts.map((item) => item.id)),
+    workflowIds: new Set(cycle.workflows.map((item) => item.id)),
+    agentIds: new Set(cycle.agents.map((item) => item.id))
+  };
+  const promptIds = new Set<string>();
+  const workflowIds = new Set<string>();
+  const agentIds = new Set<string>();
+  if (kind === "prompt") {
+    promptIds.add(id);
+    let changed = true;
+    while (changed) {
+      changed = false;
+      for (const prompt of cycle.prompts) if (prompt.parentPromptId && promptIds.has(prompt.parentPromptId) && !promptIds.has(prompt.id)) { promptIds.add(prompt.id); changed = true; }
+    }
+    for (const workflow of cycle.workflows) if (workflow.parentPromptId && promptIds.has(workflow.parentPromptId)) workflowIds.add(workflow.id);
+    for (const agent of cycle.agents) if (agent.parentPromptId && promptIds.has(agent.parentPromptId)) agentIds.add(agent.id);
+  } else if (kind === "workflow") {
+    workflowIds.add(id);
+    let changed = true;
+    while (changed) {
+      changed = false;
+      for (const workflow of cycle.workflows) if (workflow.parentWorkflowRunId && workflowIds.has(workflow.parentWorkflowRunId) && !workflowIds.has(workflow.id)) { workflowIds.add(workflow.id); changed = true; }
+    }
+    for (const prompt of cycle.prompts) if (prompt.workflowRunId && workflowIds.has(prompt.workflowRunId)) promptIds.add(prompt.id);
+    for (const agent of cycle.agents) if (agent.workflowRunId && workflowIds.has(agent.workflowRunId)) agentIds.add(agent.id);
+  } else if (kind === "agent") {
+    agentIds.add(id);
+    let changed = true;
+    while (changed) {
+      changed = false;
+      for (const agent of cycle.agents) if (agent.parentAgentRunId && agentIds.has(agent.parentAgentRunId) && !agentIds.has(agent.id)) { agentIds.add(agent.id); changed = true; }
+    }
+    for (const prompt of cycle.prompts) if (prompt.agentRunId && agentIds.has(prompt.agentRunId)) promptIds.add(prompt.id);
+    for (const workflow of cycle.workflows) if (workflow.parentAgentRunId && agentIds.has(workflow.parentAgentRunId)) workflowIds.add(workflow.id);
+  }
+  return { promptIds, workflowIds, agentIds };
+}
+
+export function lifecycleEvidence(cycle: PromptCycleRecord, kind: LifecycleKind, id: string): LifecycleEvidence {
+  const ids = lifecycleIds(cycle, kind, id);
+  const interactions = cycle.interactions.filter((interaction) => kind === "cycle"
+    || (interaction.promptId !== null && ids.promptIds.has(interaction.promptId))
+    || (interaction.workflowRunId !== null && ids.workflowIds.has(interaction.workflowRunId))
+    || (interaction.agentRunId !== null && ids.agentIds.has(interaction.agentRunId)));
+  const touchedNodeIds = [...new Set(interactions.map((interaction) => interaction.nodeId))];
+  const delivered = new Set(cycle.delivery?.deliveredNodeIds ?? []);
+  const verified = new Set(cycle.delivery?.verifiedNodeIds ?? []);
+  if (kind === "cycle" && cycle.delivery) return {
+    eventIds: cycle.delivery.pathEventIds,
+    touchedNodeIds: cycle.delivery.touchedNodeIds,
+    changedNodeIds: cycle.delivery.changedNodeIds,
+    deliveredNodeIds: cycle.delivery.deliveredNodeIds,
+    verifiedNodeIds: cycle.delivery.verifiedNodeIds,
+    tokens: interactions.reduce((sum, interaction) => sum + interaction.tokens, 0)
+  };
+  return {
+    eventIds: [...new Set(interactions.map((interaction) => interaction.eventId))],
+    touchedNodeIds,
+    changedNodeIds: [...new Set(interactions.filter((interaction) => ["changed", "delivered", "reverted"].includes(interaction.role)).map((interaction) => interaction.nodeId))],
+    deliveredNodeIds: touchedNodeIds.filter((nodeId) => delivered.has(nodeId)),
+    verifiedNodeIds: touchedNodeIds.filter((nodeId) => verified.has(nodeId)),
+    tokens: interactions.reduce((sum, interaction) => sum + interaction.tokens, 0)
+  };
 }
 
 function firstEvent(events: readonly LedgerEvent[], type: string, predicate: (event: LedgerEvent) => boolean = () => true): LedgerEvent | undefined {
@@ -252,7 +334,8 @@ function modelGraph(graph: RepositoryGraph, events: readonly LedgerEvent[], sele
 
 function traceNodeIds(node: PositionedNode): string[] {
   const sourceId = typeof node.data?.sourceNodeId === "string" ? node.data.sourceNodeId : null;
-  return [...new Set([node.id, ...(sourceId ? [sourceId] : []), ...(node.event?.nodeIds ?? [])])];
+  const summarized = stringArray(node.data?.nodeIds);
+  return [...new Set([node.id, ...(sourceId ? [sourceId] : []), ...summarized, ...(node.event?.nodeIds ?? [])])];
 }
 
 function routesGraph(graph: RepositoryGraph, events: readonly LedgerEvent[], selectedProjectId: string | null, selectedNodeId: string | null): DisplayGraph {
@@ -301,9 +384,26 @@ function eventLane(event: LedgerEvent): string {
   return String(event.data.laneId ?? "main");
 }
 
-function scenarioGraph(graph: RepositoryGraph, events: readonly LedgerEvent[], selectedProjectId: string | null): DisplayGraph {
+function lifecycleStatus(status: string): EventStatus {
+  if (status === "completed" || status === "stopped") return "passed";
+  if (status === "blocked" || status === "failed" || status === "missed") return "failed";
+  if (status === "active") return "active";
+  if (status === "detached") return "observed";
+  return "planned";
+}
+
+function lifecycleSubtitle(evidence: LifecycleEvidence, suffix = ""): string {
+  const summary = `${formatCompactTokens(evidence.tokens)} tokens · ${evidence.touchedNodeIds.length} touched · ${evidence.deliveredNodeIds.length} delivered`;
+  return suffix ? `${summary} · ${suffix}` : summary;
+}
+
+function formatCompactTokens(value: number): string {
+  return new Intl.NumberFormat(undefined, { notation: value >= 10_000 ? "compact" : "standard", maximumFractionDigits: 1 }).format(value);
+}
+
+function scenarioEventNodes(graph: RepositoryGraph, events: readonly LedgerEvent[], selectedProjectId: string | null): DisplayNode[] {
   const ignored = new Set(["usage.sampled", "agent.stopped", "hook.invoked", "tool.prepared"]);
-  const candidates = events.filter((event) => !ignored.has(event.type)).flatMap((event): DisplayNode[] => {
+  return events.filter((event) => !ignored.has(event.type)).flatMap((event): DisplayNode[] => {
     const projectId = eventProject(graph, event);
     if (selectedProjectId && projectId !== selectedProjectId) return [];
     const project = graph.architecture?.projects.find((item) => item.id === projectId);
@@ -342,29 +442,142 @@ function scenarioGraph(graph: RepositoryGraph, events: readonly LedgerEvent[], s
       event,
       data: { projectId, laneId, parentLaneId: event.data.parentLaneId, order: event.seq }
     }];
-  }).slice(-72);
+  }).slice(-48);
+}
 
-  const laneLabels = new Map<string, string>();
-  for (const node of candidates) {
-    const lane = String(node.data?.laneId ?? "main");
-    const description = typeof node.event?.data.description === "string" ? node.event.data.description : null;
-    const agentType = typeof node.event?.data.agentType === "string" ? node.event.data.agentType : null;
-    if (!laneLabels.has(lane)) laneLabels.set(lane, lane === "main" ? "Main agent" : description ?? agentType ?? `Agent ${lane.slice(0, 8)}`);
+export function scenarioGraph(graph: RepositoryGraph, events: readonly LedgerEvent[], selectedProjectId: string | null, cycle: PromptCycleRecord | null, traceView: "exploration" | "delivery", selectedNodeId: string | null = null): DisplayGraph {
+  if (!cycle) {
+    const candidates = scenarioEventNodes(graph, events, selectedProjectId);
+    const laneLabels = new Map<string, string>();
+    for (const node of candidates) laneLabels.set(String(node.data?.laneId ?? "main"), String(node.data?.laneId ?? "main") === "main" ? "Main agent" : `Agent ${String(node.data?.laneId ?? "main").slice(0, 8)}`);
+    return { nodes: candidates, edges: candidates.slice(1).map((node, index) => ({ source: candidates[index]!.id, target: node.id, kind: "next", label: "next", active: true })), lanes: [...laneLabels].map(([id, label]) => ({ id, label })) };
   }
+
+  const nodes: DisplayNode[] = [];
   const edges: DisplayEdge[] = [];
-  const lastByLane = new Map<string, DisplayNode>();
-  for (const node of candidates) {
-    const lane = String(node.data?.laneId ?? "main");
-    const previous = lastByLane.get(lane);
-    if (previous) edges.push({ source: previous.id, target: node.id, kind: "next", label: "next", active: true });
-    else {
-      const parentLane = typeof node.data?.parentLaneId === "string" ? node.data.parentLaneId : null;
-      const parent = parentLane ? lastByLane.get(parentLane) ?? lastByLane.get("main") : null;
-      if (parent) edges.push({ source: parent.id, target: node.id, kind: "spawns", label: "spawns", active: true });
-    }
-    lastByLane.set(lane, node);
+  const edgeKeys = new Set<string>();
+  const laneLabels = new Map<string, string>();
+  const mainAgent = cycle.agents.find((agent) => agent.parentAgentRunId === null) ?? cycle.agents[0];
+  const mainLane = mainAgent?.externalAgentId ?? mainAgent?.id ?? "main";
+  const agentLane = (agentId: string | null): string => {
+    const agent = cycle.agents.find((candidate) => candidate.id === agentId);
+    return agent?.externalAgentId ?? agent?.id ?? mainLane;
+  };
+  const workflowLane = (workflowId: string | null): string => workflowId ? `workflow:${workflowId}` : mainLane;
+  const addEdge = (source: string | null | undefined, target: string | null | undefined, kind: string, label: string, active = true): void => {
+    if (!source || !target || source === target) return;
+    const key = `${source}\u0000${target}\u0000${kind}`;
+    if (edgeKeys.has(key)) return;
+    edgeKeys.add(key);
+    edges.push({ source, target, kind, label, active });
+  };
+  const addLane = (id: string, label: string): void => { if (!laneLabels.has(id)) laneLabels.set(id, label); };
+  const summaryData = (kind: LifecycleKind, id: string, evidence: LifecycleEvidence): Record<string, unknown> => ({
+    lifecycleKind: kind, lifecycleId: id, eventIds: evidence.eventIds, nodeIds: evidence.touchedNodeIds,
+    touchedNodeIds: evidence.touchedNodeIds, changedNodeIds: evidence.changedNodeIds, deliveredNodeIds: evidence.deliveredNodeIds,
+    verifiedNodeIds: evidence.verifiedNodeIds, tokens: evidence.tokens
+  });
+
+  const cycleEvidence = lifecycleEvidence(cycle, "cycle", cycle.id);
+  const cycleId = lifecycleNodeId("cycle", cycle.id);
+  addLane(mainLane, "Main agent");
+  nodes.push({ id: cycleId, label: `Cycle ${cycle.ordinal}`, kicker: "Prompt cycle", subtitle: lifecycleSubtitle(cycleEvidence, cycle.status), status: lifecycleStatus(cycle.status), data: { ...summaryData("cycle", cycle.id, cycleEvidence), laneId: mainLane, column: 0 } });
+
+  for (const [index, prompt] of cycle.prompts.entries()) {
+    const evidence = lifecycleEvidence(cycle, "prompt", prompt.id);
+    const id = lifecycleNodeId("prompt", prompt.id);
+    const laneId = prompt.workflowRunId ? workflowLane(prompt.workflowRunId) : agentLane(prompt.agentRunId);
+    addLane(laneId, prompt.kind === "workflow" ? "Workflow prompts" : laneId === mainLane ? "Main agent" : `Agent ${laneId.slice(0, 8)}`);
+    nodes.push({ id, label: prompt.text, kicker: `${prompt.kind} prompt ${index + 1}`, subtitle: lifecycleSubtitle(evidence, prompt.status), status: lifecycleStatus(prompt.status), data: { ...summaryData("prompt", prompt.id, evidence), laneId, column: prompt.parentPromptId ? 1 : 1, promptKind: prompt.kind } });
+    addEdge(prompt.parentPromptId ? lifecycleNodeId("prompt", prompt.parentPromptId) : cycleId, id, "prompts", prompt.parentPromptId ? "nested prompt" : "starts");
   }
-  return { nodes: candidates, edges, lanes: [...laneLabels].map(([id, label]) => ({ id, label })) };
+
+  for (const workflow of cycle.workflows) {
+    const evidence = lifecycleEvidence(cycle, "workflow", workflow.id);
+    const id = lifecycleNodeId("workflow", workflow.id);
+    const laneId = workflowLane(workflow.id);
+    addLane(laneId, workflow.name);
+    nodes.push({ id, label: workflow.name, kicker: "Workflow", subtitle: lifecycleSubtitle(evidence, `${workflow.invokedSkills.length}/${workflow.expectedSkills.length} skills`), status: lifecycleStatus(workflow.status), data: { ...summaryData("workflow", workflow.id, evidence), laneId, column: 2, missingSkills: workflow.expectedSkills.filter((skill) => !workflow.invokedSkills.includes(skill)), missingHooks: workflow.expectedHooks.filter((hook) => !workflow.observedHooks.includes(hook)) } });
+    addEdge(workflow.parentWorkflowRunId ? lifecycleNodeId("workflow", workflow.parentWorkflowRunId) : workflow.parentPromptId ? lifecycleNodeId("prompt", workflow.parentPromptId) : workflow.parentAgentRunId ? lifecycleNodeId("agent", workflow.parentAgentRunId) : cycleId, id, "runs", "workflow");
+  }
+
+  for (const agent of cycle.agents) {
+    const evidence = lifecycleEvidence(cycle, "agent", agent.id);
+    const id = lifecycleNodeId("agent", agent.id);
+    const laneId = agentLane(agent.id);
+    addLane(laneId, agent.parentAgentRunId === null ? "Main agent" : agent.description ?? agent.agentType ?? `Agent ${laneId.slice(0, 8)}`);
+    const observed = agent.tokenUsage > 0 && agent.tokenUsage !== evidence.tokens ? `${formatCompactTokens(agent.tokenUsage)} observed` : agent.status;
+    nodes.push({ id, label: agent.description ?? agent.agentType ?? (agent.parentAgentRunId === null ? "Main coding agent" : "Nested agent"), kicker: agent.parentAgentRunId === null ? "Main agent" : "Nested agent", subtitle: lifecycleSubtitle(evidence, observed), status: lifecycleStatus(agent.status), data: { ...summaryData("agent", agent.id, evidence), laneId, column: agent.parentAgentRunId === null ? 2 : 2, observedTokens: agent.tokenUsage, model: agent.model, agentType: agent.agentType } });
+    addEdge(agent.parentAgentRunId ? lifecycleNodeId("agent", agent.parentAgentRunId) : agent.parentPromptId ? lifecycleNodeId("prompt", agent.parentPromptId) : cycleId, id, agent.parentAgentRunId ? "delegates" : "runs", agent.parentAgentRunId ? "delegates" : "agent");
+  }
+
+  if (cycle.delivery) {
+    const delivery = cycle.delivery;
+    const delivered = new Set(delivery.deliveredNodeIds);
+    const verified = new Set(delivery.verifiedNodeIds);
+    const references = new Set(delivery.referenceNodeIds);
+    const reverted = new Set(delivery.revertedNodeIds);
+    const tokenByNode = new Map<string, number>();
+    for (const interaction of cycle.interactions) tokenByNode.set(interaction.nodeId, (tokenByNode.get(interaction.nodeId) ?? 0) + interaction.tokens);
+    const priority = (nodeId: string): number => verified.has(nodeId) ? 0 : delivered.has(nodeId) ? 1 : references.has(nodeId) ? 2 : reverted.has(nodeId) ? 3 : 4;
+    const selectedLifecycle = selectedNodeId?.match(/^lifecycle:(cycle|prompt|workflow|agent):(.+)$/);
+    const selectedEvidence = selectedLifecycle ? lifecycleEvidence(cycle, selectedLifecycle[1] as LifecycleKind, selectedLifecycle[2]!) : null;
+    const selectedIds = selectedEvidence ? (traceView === "delivery" ? selectedEvidence.deliveredNodeIds : selectedEvidence.touchedNodeIds) : [];
+    const selectedIdSet = new Set(selectedIds);
+    const requestedIds = traceView === "delivery" ? [...selectedIds, ...delivery.pathNodeIds] : [...selectedIds, ...delivery.touchedNodeIds];
+    const sourceNodes = [...new Set(requestedIds)].map((id) => graph.nodes.find((node) => node.id === id)).filter((node): node is GraphNode => Boolean(node))
+      .filter((node) => !selectedProjectId || node.id === selectedProjectId || node.data.projectId === selectedProjectId)
+      .sort((left, right) => Number(!selectedIdSet.has(left.id)) - Number(!selectedIdSet.has(right.id)) || priority(left.id) - priority(right.id) || (tokenByNode.get(right.id) ?? 0) - (tokenByNode.get(left.id) ?? 0))
+      .slice(0, traceView === "delivery" ? 42 : 54);
+    const sourceIds = new Set(sourceNodes.map((node) => node.id));
+    const projectGroups = new Map<string, GraphNode[]>();
+    for (const source of sourceNodes) {
+      const projectId = typeof source.data.projectId === "string" ? source.data.projectId : "repository";
+      const group = projectGroups.get(projectId) ?? [];
+      group.push(source);
+      projectGroups.set(projectId, group);
+    }
+    for (const [projectId, projectNodes] of projectGroups) {
+      const project = graph.architecture?.projects.find((item) => item.id === projectId);
+      projectNodes.forEach((source, index) => {
+        const chunk = Math.floor(index / 7);
+        const laneId = `delivery:${projectId}:${chunk}`;
+        addLane(laneId, chunk === 0 ? project?.name ?? "Repository delivery" : `${project?.name ?? "Repository"} continued`);
+        const role = verified.has(source.id) ? "verified" : delivered.has(source.id) ? "delivered" : references.has(source.id) ? "reference" : reverted.has(source.id) ? "reverted" : "touched";
+        const interactions = cycle.interactions.filter((interaction) => interaction.nodeId === source.id);
+        const display = asDisplayNode(source, new Map());
+        nodes.push({ ...display, id: `delivery:${source.id}`, kicker: role, subtitle: `${formatCompactTokens(tokenByNode.get(source.id) ?? 0)} tokens · ${source.file}:${source.line}`, status: role === "verified" ? "passed" : role === "delivered" ? "changed" : role === "reverted" ? "failed" : "observed", data: { ...display.data, sourceNodeId: source.id, deliveryRole: role, tokens: tokenByNode.get(source.id) ?? 0, eventIds: interactions.map((item) => item.eventId), laneId, column: 3 + index % 7 } });
+        const owners = new Set(interactions.map((interaction) => interaction.agentRunId ? lifecycleNodeId("agent", interaction.agentRunId) : interaction.workflowRunId ? lifecycleNodeId("workflow", interaction.workflowRunId) : interaction.promptId ? lifecycleNodeId("prompt", interaction.promptId) : cycleId));
+        if (owners.size === 0) owners.add(cycleId);
+        for (const owner of owners) addEdge(owner, `delivery:${source.id}`, role, role);
+      });
+    }
+    for (const edge of graph.edges) if (sourceIds.has(edge.source) && sourceIds.has(edge.target) && (traceView === "exploration" || delivery.pathEdgeIds.includes(edge.id))) addEdge(`delivery:${edge.source}`, `delivery:${edge.target}`, edge.kind, edgeLabel(edge), false);
+    const outcomeId = `lifecycle:outcome:${cycle.id}`;
+    const maximumColumn = Math.max(4, ...nodes.map((node) => Number(node.data?.column ?? 0))) + 1;
+    nodes.push({ id: outcomeId, label: `${delivery.deliveredNodeIds.length} delivered nodes`, kicker: "Cycle outcome", subtitle: `${delivery.verifiedNodeIds.length} verified · ${delivery.referenceNodeIds.length} references · ${formatCompactTokens(delivery.tokenUsage)} tokens`, status: cycle.status === "blocked" ? "failed" : "passed", data: { laneId: mainLane, column: maximumColumn, tokens: delivery.tokenUsage, nodeIds: delivery.pathNodeIds, deliveredNodeIds: delivery.deliveredNodeIds, verifiedNodeIds: delivery.verifiedNodeIds, deliveryRole: "outcome" } });
+    const contributing = sourceNodes.filter((node) => delivered.has(node.id));
+    if (contributing.length === 0) addEdge(cycleId, outcomeId, "stops", "stopped");
+    for (const source of contributing) addEdge(`delivery:${source.id}`, outcomeId, "contributes", "delivers");
+  } else {
+    const candidates = scenarioEventNodes(graph, events, selectedProjectId);
+    const lastByLane = new Map<string, string>();
+    const countByLane = new Map<string, number>();
+    for (const node of candidates) {
+      const laneId = String(node.data?.laneId ?? mainLane);
+      const agent = cycle.agents.find((candidate) => candidate.externalAgentId === laneId || candidate.id === node.event?.agentRunId);
+      addLane(laneId, laneId === mainLane ? "Main agent" : agent?.description ?? agent?.agentType ?? `Agent ${laneId.slice(0, 8)}`);
+      const laneCount = countByLane.get(laneId) ?? 0;
+      node.data = { ...node.data, laneId, column: 3 + laneCount };
+      countByLane.set(laneId, laneCount + 1);
+      nodes.push(node);
+      const owner = node.event?.agentRunId ? lifecycleNodeId("agent", node.event.agentRunId) : node.event?.workflowRunId ? lifecycleNodeId("workflow", node.event.workflowRunId) : node.event?.promptId ? lifecycleNodeId("prompt", node.event.promptId) : cycleId;
+      addEdge(lastByLane.get(laneId) ?? owner, node.id, lastByLane.has(laneId) ? "next" : "acts", lastByLane.has(laneId) ? "next" : "acts");
+      lastByLane.set(laneId, node.id);
+    }
+  }
+
+  return { nodes, edges, lanes: [...laneLabels].map(([id, label]) => ({ id, label })) };
 }
 
 export function layoutDisplayGraph(graph: DisplayGraph, mode: GraphMode, width: number): PositionedNode[] {
@@ -372,7 +585,14 @@ export function layoutDisplayGraph(graph: DisplayGraph, mode: GraphMode, width: 
     const lanes = graph.lanes ?? [{ id: "main", label: "Main agent" }];
     const laneIndex = new Map(lanes.map((lane, index) => [lane.id, index]));
     const order = [...graph.nodes].sort((left, right) => Number(left.data?.order ?? 0) - Number(right.data?.order ?? 0));
-    return order.map((node, index) => ({ ...node, x: 190 + index * 245, y: 125 + (laneIndex.get(String(node.data?.laneId ?? "main")) ?? 0) * 165 }));
+    const laneColumns = new Map<string, number>();
+    return order.map((node) => {
+      const laneId = String(node.data?.laneId ?? "main");
+      const nextColumn = laneColumns.get(laneId) ?? 0;
+      const column = typeof node.data?.column === "number" ? node.data.column : nextColumn;
+      laneColumns.set(laneId, Math.max(nextColumn, column + 1));
+      return { ...node, x: 190 + column * 245, y: 125 + (laneIndex.get(laneId) ?? 0) * 165 };
+    });
   }
   if (mode === "proof") return graph.nodes.map((node, index) => ({ ...node, x: 170 + index * 245, y: 210 }));
   if (mode === "model" && graph.nodes.length > 1 && graph.nodes.every((node) => node.kind === "project")) {
@@ -453,6 +673,11 @@ function contextBubbles(selected: PositionedNode | undefined, graph: RepositoryG
     if (typeof source.data.returns === "string") result.push({ label: "Returns", detail: source.data.returns });
     if (fields.length > 0) result.push({ label: "Data fields", detail: fields.slice(0, 4).join(" · ") });
   }
+  if (typeof selected.data?.tokens === "number") result.push({ label: "Attributed tokens", detail: formatCompactTokens(selected.data.tokens) });
+  if (Array.isArray(selected.data?.touchedNodeIds)) result.push({ label: "Touched nodes", detail: String(selected.data.touchedNodeIds.length) });
+  if (Array.isArray(selected.data?.deliveredNodeIds)) result.push({ label: "Delivered nodes", detail: String(selected.data.deliveredNodeIds.length) });
+  if (Array.isArray(selected.data?.verifiedNodeIds)) result.push({ label: "Verified nodes", detail: String(selected.data.verifiedNodeIds.length) });
+  if (typeof selected.data?.deliveryRole === "string") result.push({ label: "Delivery role", detail: selected.data.deliveryRole });
   const eventData = selected.event?.data;
   if (eventData) {
     if (typeof eventData.laneId === "string") result.push({ label: "Workflow lane", detail: eventData.laneId });
@@ -546,7 +771,7 @@ function clamp(value: number, minimum: number, maximum: number): number {
   return Math.min(maximum, Math.max(minimum, value));
 }
 
-export function GraphCanvas({ mode, graph, events, selectedNodeId, selectedProjectId, onSelectNode, onOpenNode, onClearSelection, delivery, traceView }: GraphCanvasProps): JSX.Element {
+export function GraphCanvas({ mode, graph, events, selectedNodeId, selectedProjectId, onSelectNode, onOpenNode, onClearSelection, delivery, traceView, cycle }: GraphCanvasProps): JSX.Element {
   const containerRef = useRef<HTMLDivElement>(null);
   const pointers = useRef(new Map<number, { x: number; y: number }>());
   const gesture = useRef<{ center: { x: number; y: number }; distance: number } | null>(null);
@@ -565,7 +790,7 @@ export function GraphCanvas({ mode, graph, events, selectedNodeId, selectedProje
     return () => observer.disconnect();
   }, []);
 
-  const displayGraph = useMemo(() => mode === "proof" ? proofGraph(events) : mode === "model" ? modelGraph(graph, events, selectedProjectId, delivery) : mode === "routes" ? routesGraph(graph, events, selectedProjectId, selectedNodeId) : scenarioGraph(graph, events, selectedProjectId), [delivery, events, graph, mode, selectedNodeId, selectedProjectId]);
+  const displayGraph = useMemo(() => mode === "proof" ? proofGraph(events) : mode === "model" ? modelGraph(graph, events, selectedProjectId, delivery) : mode === "routes" ? routesGraph(graph, events, selectedProjectId, selectedNodeId) : scenarioGraph(graph, events, selectedProjectId, cycle, traceView, selectedNodeId), [cycle, delivery, events, graph, mode, selectedNodeId, selectedProjectId, traceView]);
   const nodes = useMemo(() => layoutDisplayGraph(displayGraph, mode, size.width), [displayGraph, mode, size.width]);
   const byId = useMemo(() => new Map(nodes.map((node) => [node.id, node])), [nodes]);
   const selected = selectedNodeId ? byId.get(selectedNodeId) : undefined;
@@ -601,10 +826,13 @@ export function GraphCanvas({ mode, graph, events, selectedNodeId, selectedProje
     const relatedBounds = bounds(related);
     const focusWidth = Math.max(1, relatedBounds.right - relatedBounds.left);
     const focusHeight = Math.max(1, relatedBounds.bottom - relatedBounds.top);
-    const scale = clamp(Math.min((size.width - 240) / focusWidth, (size.height - 220) / focusHeight), 0.55, 1.25);
+    const leftInset = size.width > 900 ? 330 : 30;
+    const rightInset = size.width > 900 ? 340 : 30;
+    const availableWidth = Math.max(320, size.width - leftInset - rightInset);
+    const scale = clamp(Math.min((availableWidth - 50) / focusWidth, (size.height - 220) / focusHeight), MIN_SCALE, 1.25);
     setView({
       scale,
-      x: (size.width - focusWidth * scale) / 2 - relatedBounds.left * scale,
+      x: leftInset + (availableWidth - focusWidth * scale) / 2 - relatedBounds.left * scale,
       y: (size.height - focusHeight * scale) / 2 - relatedBounds.top * scale
     });
   }, [focus.directNodeIds, nodes, selected, selectedNodeId, size.height, size.width]);
@@ -719,7 +947,8 @@ export function GraphCanvas({ mode, graph, events, selectedNodeId, selectedProje
                 : nodeIds.some((id) => referenceIds.has(id)) ? "is-delivery-reference"
                   : nodeIds.some((id) => unrelatedIds.has(id)) ? "is-unrelated-touch" : "is-muted";
             const focusClass = selectedNodeId === node.id ? "is-selected" : focus.directNodeIds.has(node.id) ? "is-related" : focus.secondaryNodeIds.has(node.id) ? "is-secondary" : hasFocus ? "is-muted" : deliveryFocus ? deliveryClass : "";
-            return <g key={node.id} transform={`translate(${node.x - NODE_WIDTH / 2} ${node.y - NODE_HEIGHT / 2})`} className={`graph-node graph-node--${node.status} graph-node--kind-${node.kind ?? "evidence"} ${focusClass}`} role="button" tabIndex={0} aria-label={`${node.label}, ${node.status}`} onPointerDown={(event) => event.stopPropagation()} onClick={() => onSelectNode(node)} onDoubleClick={() => onOpenNode(node)} onKeyDown={(event) => activateWithKeyboard(event, () => onSelectNode(node))}>
+            const lifecycleClass = typeof node.data?.lifecycleKind === "string" ? `graph-node--lifecycle-${node.data.lifecycleKind}` : typeof node.data?.deliveryRole === "string" ? `graph-node--delivery-${node.data.deliveryRole}` : "";
+            return <g key={node.id} transform={`translate(${node.x - NODE_WIDTH / 2} ${node.y - NODE_HEIGHT / 2})`} className={`graph-node graph-node--${node.status} graph-node--kind-${node.kind ?? "evidence"} ${lifecycleClass} ${focusClass}`} role="button" tabIndex={0} aria-label={`${node.label}, ${node.status}`} onPointerDown={(event) => event.stopPropagation()} onClick={() => onSelectNode(node)} onDoubleClick={() => onOpenNode(node)} onKeyDown={(event) => activateWithKeyboard(event, () => onSelectNode(node))}>
               <rect width={NODE_WIDTH} height={NODE_HEIGHT} rx="14" />
               <circle className="graph-node__status" cx="18" cy="20" r="5" />
               <text className="graph-node__kicker" x="31" y="23">{shorten(node.kicker.toUpperCase(), 28)}</text>

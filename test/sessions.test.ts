@@ -94,3 +94,14 @@ test("a deleted file remains part of the delivered node set", () => {
   assert.deepEqual(new Set(delivery.deliveredNodeIds), new Set(originalNodeIds));
   assert.deepEqual(delivery.revertedNodeIds, []);
 });
+
+test("a superseded cycle with stop evidence is reconciled into a delivery snapshot", () => {
+  const root = project();
+  const first = createRun(root, "First cycle");
+  appendEvent(root, { runId: first.id, type: "agent.stopped", status: "observed" });
+  createRun(root, "Second cycle", { sessionId: first.sessionId, parentCycleId: first.cycleId });
+
+  const session = readSessionRecords(root)[0];
+  assert.equal(session?.cycles[0]?.status, "stopped");
+  assert.ok(session?.cycles[0]?.delivery);
+});

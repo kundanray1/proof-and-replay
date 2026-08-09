@@ -34,6 +34,18 @@ npx proof-replay session --session session_...
 
 Or use `GET /api/sessions` and `GET /api/session?id=session_...` from a local dashboard integration.
 
+## Navigating a recorded cycle
+
+The Live scenario panel turns each cycle, prompt, workflow, and agent into a selectable graph node. The hierarchy card and graph node display attributed token totals plus touched, changed, and delivered node counts. Selecting one focuses its direct delivery relationships, opens its mapped code and evidence-event summary, and shows the final recorded diff when it contributed delivered code.
+
+An active cycle shows its current lifecycle and recent steps. A stopped cycle defaults to a bounded delivery graph:
+
+```text
+prompt cycle → prompt/workflow → main or nested agent → delivered/reference code → cycle outcome
+```
+
+Use **Touched** to compare exploration. Historical cycle selection remains pinned while a newer cycle is running; automatic following occurs only when the dashboard was already displaying the latest cycle.
+
 ## Node roles
 
 Node interactions retain the original action and acquire a final role when the cycle stops:

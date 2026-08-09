@@ -8,6 +8,19 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 No unreleased changes.
 
+## [0.4.1] - 2026-08-09
+
+### Added
+
+- Clickable cycle, prompt, workflow, and agent records that focus their connected subgraph and expose attributed tokens, touched nodes, changed nodes, delivered nodes, evidence events, mapped code, and recorded diffs.
+- Compact stopped-cycle graphs connecting the prompt hierarchy and nested agents to delivered and reference code nodes and a final cycle outcome.
+
+### Fixed
+
+- Superseded cycles with existing stop evidence are reconciled into delivery snapshots instead of remaining permanently active.
+- Selecting an older stopped cycle no longer jumps back to a newer running cycle during polling.
+- Selected lifecycle mappings are prioritized so their delivered code stays visible in bounded large-repository graphs.
+
 ## [0.4.0] - 2026-08-09
 
 ### Added
@@ -85,7 +98,8 @@ No unreleased changes.
 - Vendor-neutral event command and programmatic package API.
 - Demonstration project, generic multi-monorepo integration guide, automated tests, and CI.
 
-[Unreleased]: https://github.com/kundanray1/proof-and-replay/compare/v0.4.0...HEAD
+[Unreleased]: https://github.com/kundanray1/proof-and-replay/compare/v0.4.1...HEAD
+[0.4.1]: https://github.com/kundanray1/proof-and-replay/compare/v0.4.0...v0.4.1
 [0.4.0]: https://github.com/kundanray1/proof-and-replay/compare/v0.3.1...v0.4.0
 [0.3.1]: https://github.com/kundanray1/proof-and-replay/compare/v0.3.0...v0.3.1
 [0.3.0]: https://github.com/kundanray1/proof-and-replay/compare/v0.2.0...v0.3.0

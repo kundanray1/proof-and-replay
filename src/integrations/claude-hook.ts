@@ -99,6 +99,11 @@ function activeRun(root: string, payload: ClaudeHookPayload): ProofRun | null {
   let run = getRun(root, active.runId);
   const cycleStopped = run ? readEvents(root, run.id).some((event) => event.type === "agent.stopped") : false;
   if (payload.hook_event_name === "UserPromptSubmit" && (!run || run.status !== "running" || cycleStopped)) {
+    if (run?.status === "running" && cycleStopped) {
+      const priorEvents = readEvents(root, run.id);
+      finalizeSessionCycle(root, run.id, priorEvents, "stopped");
+      run = updateRun(root, run.id, { status: "stopped", completedAt: priorEvents.filter((event) => event.type === "agent.stopped").at(-1)?.timestamp ?? new Date().toISOString() });
+    }
     const sessionId = active.proofSessionId ?? run?.sessionId;
     const next = createRun(root, payload.prompt ?? "Continue Claude coding session", {
       provider: "claude",
@@ -212,7 +217,9 @@ function recordTokenUsage(root: string, run: ProofRun, payload: ClaudeHookPayloa
       deltaTokens,
       warning: usage.totalTokens >= config.sessionWarningTokens || deltaTokens >= config.turnSpikeTokens,
       sessionWarningTokens: config.sessionWarningTokens,
-      turnSpikeTokens: config.turnSpikeTokens
+      turnSpikeTokens: config.turnSpikeTokens,
+      agentId: payload.agent_id,
+      laneId: payload.agent_id ?? payload.session_id
     }
   });
 }

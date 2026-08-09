@@ -2,7 +2,7 @@ import fs from "node:fs";
 import path from "node:path";
 import { eventId, runId as createRunId, stableId } from "./ids.js";
 import { statePaths } from "./paths.js";
-import { createSessionCycle, eventContext, migrateLegacySessions, projectSessionEvent, readSessions } from "./sessions.js";
+import { createSessionCycle, eventContext, migrateLegacySessions, projectSessionEvent, readSessions, reconcileStoppedCycles } from "./sessions.js";
 import type {
   AppendEventInput,
   LedgerEvent,
@@ -206,9 +206,20 @@ export function appendEvent(root: string, input: AppendEventInput): LedgerEvent 
 }
 
 export function readSessionRecords(root: string): SessionRecord[] {
-  const sessions = readSessions(root);
-  if (sessions.length > 0) return sessions;
-  return migrateLegacySessions(root, readRuns(root), readEvents(root));
+  let sessions = readSessions(root);
+  const runs = readRuns(root);
+  const events = readEvents(root);
+  if (sessions.length === 0) sessions = migrateLegacySessions(root, runs, events);
+  const finalizedRunIds = reconcileStoppedCycles(root, runs, events);
+  if (finalizedRunIds.length > 0) {
+    const finalized = new Set(finalizedRunIds);
+    const nextRuns = runs.map((run) => finalized.has(run.id) && run.status === "running"
+      ? { ...run, status: "stopped" as const, completedAt: events.filter((event) => event.runId === run.id && event.type === "agent.stopped").at(-1)?.timestamp ?? new Date().toISOString() }
+      : run);
+    writeJsonAtomic(statePaths(root).runs, nextRuns);
+    sessions = readSessions(root);
+  }
+  return sessions;
 }
 
 export function resetState(root: string): void {

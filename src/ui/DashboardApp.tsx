@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type { LedgerEvent, ProofCheck, ProofReplayConfig, ProofResult, ProofRun, RepositoryGraph, RouteDefinition, SessionRecord, TokenUsage } from "../types.js";
-import { GraphCanvas } from "./components/GraphCanvas.js";
-import type { DisplayNode, GraphMode } from "./components/GraphCanvas.js";
+import { GraphCanvas, lifecycleEvidence, lifecycleNodeId } from "./components/GraphCanvas.js";
+import type { DisplayNode, GraphMode, LifecycleKind } from "./components/GraphCanvas.js";
 import { Badge, Button, Panel, PanelHeader, PlayIcon, Select } from "./components/primitives.js";
 
 const EMPTY_GRAPH: RepositoryGraph = { schemaVersion: 1, generatedAt: "", root: "", nodes: [], edges: [], stats: { files: 0, functions: 0, tests: 0, edges: 0, projects: 0, routes: 0 } };
@@ -232,13 +232,14 @@ export function DashboardApp(): JSX.Element {
         setRuns(nextRuns);
         setSessions(nextSessions);
         if (!run || run.status === "running") return;
+        if (session?.cycles.at(-1)?.runId !== selectedRunId) return;
         const currentSession = nextSessions.find((candidate) => candidate.id === run.sessionId);
         const latestCycle = currentSession?.cycles.at(-1);
         if (latestCycle && latestCycle.runId !== selectedRunId) setSelectedRunId(latestCycle.runId);
       }).catch(() => undefined);
     }, 1_500);
     return () => window.clearInterval(timer);
-  }, [run, selectedRunId]);
+  }, [run, selectedRunId, session]);
 
   useEffect(() => {
     if (replayCount === null) return;
@@ -305,6 +306,15 @@ export function DashboardApp(): JSX.Element {
     });
     const callers = incoming.filter((edge) => edge.kind === "calls").slice(0, 6).map((edge) => graph.nodes.find((candidate) => candidate.id === edge.source)?.label ?? edge.source);
     const models = outgoing.filter((edge) => edge.kind === "uses-data").slice(0, 6).map((edge) => graph.nodes.find((candidate) => candidate.id === edge.target)?.label ?? edge.target);
+    const summarizedTouched = stringList(node.data?.touchedNodeIds);
+    const summarizedChanged = stringList(node.data?.changedNodeIds);
+    const summarizedDelivered = stringList(node.data?.deliveredNodeIds);
+    const summarizedVerified = stringList(node.data?.verifiedNodeIds);
+    const summarizedEvents = stringList(node.data?.eventIds);
+    const summarizedTokens = typeof node.data?.tokens === "number" ? node.data.tokens : 0;
+    const summarizedNodeLabels = summarizedTouched.slice(0, 8).map((nodeId) => graph.nodes.find((candidate) => candidate.id === nodeId)?.label ?? nodeId);
+    const missingSkills = stringList(node.data?.missingSkills);
+    const missingHooks = stringList(node.data?.missingHooks);
     setInspector({
       title: node.label,
       detail: inference ?? (node.subtitle || (node.file ? `${node.file}${node.line ? `:${node.line}` : ""}` : `${node.kicker} evidence node`)),
@@ -315,6 +325,16 @@ export function DashboardApp(): JSX.Element {
         ...(cycleRoles.length > 0 ? [["Cycle roles", cycleRoles.join(" · ")] as const] : []),
         ...(deliveryRole ? [["Delivery role", deliveryRole] as const] : []),
         ...(attributedTokens > 0 ? [["Attributed tokens", formatTokens(attributedTokens)] as const] : []),
+        ...(summarizedTokens > 0 ? [["Mapped tokens", formatTokens(summarizedTokens)] as const] : []),
+        ...(typeof node.data?.observedTokens === "number" && node.data.observedTokens > 0 ? [["Provider observed", formatTokens(node.data.observedTokens)] as const] : []),
+        ...(summarizedTouched.length > 0 ? [["Touched nodes", String(summarizedTouched.length)] as const] : []),
+        ...(summarizedChanged.length > 0 ? [["Changed nodes", String(summarizedChanged.length)] as const] : []),
+        ...(summarizedDelivered.length > 0 ? [["Delivered nodes", String(summarizedDelivered.length)] as const] : []),
+        ...(summarizedVerified.length > 0 ? [["Verified nodes", String(summarizedVerified.length)] as const] : []),
+        ...(summarizedEvents.length > 0 ? [["Evidence events", String(summarizedEvents.length)] as const] : []),
+        ...(summarizedNodeLabels.length > 0 ? [["Mapped code", summarizedNodeLabels.join(" · ")] as const] : []),
+        ...(missingSkills.length > 0 ? [["Missing skills", missingSkills.join(" · ")] as const] : []),
+        ...(missingHooks.length > 0 ? [["Missing hooks", missingHooks.join(" · ")] as const] : []),
         ...(parameters.length > 0 ? [["Parameters", parameters.join(", ")] as const] : []),
         ...(source && typeof source.data.returns === "string" ? [["Returns", source.data.returns] as const] : []),
         ...(fields.length > 0 ? [["Fields", fields.slice(0, 8).join(" · ")] as const] : []),
@@ -328,9 +348,36 @@ export function DashboardApp(): JSX.Element {
         ...(typeof node.event?.data.totalTokens === "number" ? [["Agent tokens", formatTokens(node.event.data.totalTokens)] as const] : []),
         ...(node.event ? [["Event", node.event.type] as const] : [])
       ],
-      diff: typeof node.event?.data.diff === "string" ? node.event.data.diff : typeof changed?.data.diff === "string" ? changed.data.diff : deliveryRole?.includes("deliver") && delivery?.diff ? delivery.diff : undefined
+      diff: typeof node.event?.data.diff === "string" ? node.event.data.diff : typeof changed?.data.diff === "string" ? changed.data.diff : (deliveryRole?.includes("deliver") || summarizedDelivered.length > 0) && delivery?.diff ? delivery.diff : undefined
     });
   }, [cycle, delivery, graph, visibleEvents]);
+
+  const inspectLifecycle = useCallback((kind: LifecycleKind, id: string): void => {
+    if (!cycle) return;
+    const evidence = lifecycleEvidence(cycle, kind, id);
+    const prompt = kind === "prompt" ? cycle.prompts.find((item) => item.id === id) : undefined;
+    const workflow = kind === "workflow" ? cycle.workflows.find((item) => item.id === id) : undefined;
+    const agent = kind === "agent" ? cycle.agents.find((item) => item.id === id) : undefined;
+    const lifecycleStatus = kind === "cycle" ? cycle.status : prompt?.status ?? workflow?.status ?? agent?.status ?? "planned";
+    const status: DisplayNode["status"] = lifecycleStatus === "completed" || lifecycleStatus === "stopped" ? "passed"
+      : lifecycleStatus === "blocked" || lifecycleStatus === "failed" || lifecycleStatus === "missed" ? "failed"
+        : lifecycleStatus === "active" ? "active" : "planned";
+    const label = kind === "cycle" ? `Cycle ${cycle.ordinal}: ${cycle.prompt}` : prompt?.text ?? workflow?.name ?? agent?.description ?? agent?.agentType ?? "Agent";
+    const detail = kind === "cycle" ? `${cycle.status} prompt cycle from ${formatTime(cycle.startedAt)}${cycle.stoppedAt ? ` to ${formatTime(cycle.stoppedAt)}` : ""}`
+      : kind === "prompt" ? `${prompt?.kind ?? "nested"} prompt · ${prompt?.status ?? "planned"}`
+        : kind === "workflow" ? `${workflow?.status ?? "planned"} workflow · ${workflow?.invokedSkills.length ?? 0}/${workflow?.expectedSkills.length ?? 0} required skills observed`
+          : `${agent?.parentAgentRunId ? "nested" : "main"} agent · ${agent?.status ?? "planned"} · ${agent?.model ?? "model unreported"}`;
+    inspectNode({
+      id: lifecycleNodeId(kind, id), label, kicker: kind, subtitle: detail, status,
+      data: {
+        lifecycleKind: kind, lifecycleId: id, touchedNodeIds: evidence.touchedNodeIds, changedNodeIds: evidence.changedNodeIds,
+        deliveredNodeIds: evidence.deliveredNodeIds, verifiedNodeIds: evidence.verifiedNodeIds, eventIds: evidence.eventIds, tokens: evidence.tokens,
+        ...(agent ? { observedTokens: agent.tokenUsage, model: agent.model, agentType: agent.agentType } : {}),
+        ...(workflow ? { missingSkills: workflow.expectedSkills.filter((skill) => !workflow.invokedSkills.includes(skill)), missingHooks: workflow.expectedHooks.filter((hook) => !workflow.observedHooks.includes(hook)) } : {})
+      }
+    });
+    setMode("scenario");
+  }, [cycle, inspectNode]);
 
   const clearNodeFocus = useCallback((): void => {
     setSelectedNodeId(null);
@@ -449,11 +496,12 @@ export function DashboardApp(): JSX.Element {
             ) : mode === "scenario" ? (
               <><PanelHeader eyebrow="Session structure" title={`Cycle ${cycle?.ordinal ?? 1}`} titleId="navigator-heading" action={<span className="event-count">{cycle?.prompts.length ?? 0}</span>} />
                 <div className="session-hierarchy">
+                  {cycle ? (() => { const evidence = lifecycleEvidence(cycle, "cycle", cycle.id); const nodeId = lifecycleNodeId("cycle", cycle.id); return <button type="button" className={`session-hierarchy__overview ${selectedNodeId === nodeId ? "is-active" : ""}`} aria-pressed={selectedNodeId === nodeId} onClick={() => inspectLifecycle("cycle", cycle.id)}><span>Cycle {cycle.ordinal}</span><strong>{formatTokens(evidence.tokens)} mapped tokens</strong><small>{evidence.touchedNodeIds.length} touched · {evidence.changedNodeIds.length} changed · {evidence.deliveredNodeIds.length} delivered</small></button>; })() : null}
                   <p className="eyebrow">Prompt lifecycles</p>
-                  {(cycle?.prompts ?? []).map((prompt, index) => <div key={prompt.id} className={`session-hierarchy__row session-hierarchy__row--${prompt.kind}`}><span>{index + 1}</span><div><strong>{truncate(prompt.text, 42)}</strong><small>{prompt.kind} · {prompt.status} · {prompt.deliveredNodeIds.length} delivered nodes</small></div></div>)}
+                  {(cycle?.prompts ?? []).map((prompt, index) => { const evidence = lifecycleEvidence(cycle!, "prompt", prompt.id); const nodeId = lifecycleNodeId("prompt", prompt.id); return <button type="button" key={prompt.id} className={`session-hierarchy__row session-hierarchy__row--${prompt.kind} ${selectedNodeId === nodeId ? "is-active" : ""}`} aria-pressed={selectedNodeId === nodeId} onClick={() => inspectLifecycle("prompt", prompt.id)}><span>{index + 1}</span><div><strong>{truncate(prompt.text, 42)}</strong><small>{prompt.kind} · {prompt.status} · {formatTokens(evidence.tokens)} tokens</small><small>{evidence.touchedNodeIds.length} touched · {evidence.deliveredNodeIds.length} delivered</small></div></button>; })}
                   <p className="eyebrow">Workflows and agents</p>
-                  {(cycle?.workflows ?? []).map((workflow) => <div className="session-hierarchy__group" key={workflow.id}><strong>{workflow.name}</strong><small>{workflow.status} · {workflow.invokedSkills.length}/{workflow.expectedSkills.length} skills · {workflow.observedHooks.length}/{workflow.expectedHooks.length} hooks</small></div>)}
-                  {(cycle?.agents ?? []).map((agent) => <div className={`session-hierarchy__group ${agent.parentAgentRunId ? "is-nested" : ""}`} key={agent.id}><strong>{agent.description ?? agent.agentType ?? "Agent"}</strong><small>{agent.status} · {agent.model ?? "model unreported"} · {formatTokens(agent.tokenUsage)} tokens</small></div>)}
+                  {(cycle?.workflows ?? []).map((workflow) => { const evidence = lifecycleEvidence(cycle!, "workflow", workflow.id); const nodeId = lifecycleNodeId("workflow", workflow.id); return <button type="button" className={`session-hierarchy__group ${selectedNodeId === nodeId ? "is-active" : ""}`} aria-pressed={selectedNodeId === nodeId} onClick={() => inspectLifecycle("workflow", workflow.id)} key={workflow.id}><strong>{workflow.name}</strong><small>{workflow.status} · {formatTokens(evidence.tokens)} tokens · {evidence.touchedNodeIds.length} nodes</small><small>{workflow.invokedSkills.length}/{workflow.expectedSkills.length} skills · {workflow.observedHooks.length}/{workflow.expectedHooks.length} hooks</small></button>; })}
+                  {(cycle?.agents ?? []).map((agent) => { const evidence = lifecycleEvidence(cycle!, "agent", agent.id); const nodeId = lifecycleNodeId("agent", agent.id); return <button type="button" className={`session-hierarchy__group ${agent.parentAgentRunId ? "is-nested" : ""} ${selectedNodeId === nodeId ? "is-active" : ""}`} aria-pressed={selectedNodeId === nodeId} onClick={() => inspectLifecycle("agent", agent.id)} key={agent.id}><strong>{agent.description ?? agent.agentType ?? "Agent"}</strong><small>{agent.status} · {agent.model ?? "model unreported"} · {formatTokens(evidence.tokens)} mapped</small><small>{evidence.touchedNodeIds.length} touched · {evidence.changedNodeIds.length} changed · {evidence.deliveredNodeIds.length} delivered{agent.tokenUsage > 0 ? ` · ${formatTokens(agent.tokenUsage)} observed` : ""}</small></button>; })}
                 </div>
                 <div className="scenario-summary"><p className="eyebrow">Mapped or inferred</p><strong>{visibleEvents.filter((event) => eventHasRepositoryContext(event, graph)).length}/{visibleEvents.length}</strong><span>events linked directly to repository nodes or inferred from repository paths in older shell activity.</span></div></>
             ) : (
@@ -468,7 +516,7 @@ export function DashboardApp(): JSX.Element {
               {selectedProjectId ? <Button variant="ghost" size="small" onClick={() => selectProject(null)}>← Whole repository</Button> : null}
               <Button variant="secondary" size="small" busy={replaying} leadingIcon={<PlayIcon />} onClick={() => { setMode("scenario"); setReplayCount(0); }} disabled={events.length === 0}>{replaying ? "Replaying" : "Replay run"}</Button>
             </div>
-            <GraphCanvas mode={mode} graph={graph} events={visibleEvents} selectedNodeId={selectedNodeId} selectedProjectId={selectedProjectId} onSelectNode={inspectNode} onOpenNode={openNode} onClearSelection={clearNodeFocus} delivery={delivery} traceView={traceView} />
+            <GraphCanvas mode={mode} graph={graph} events={visibleEvents} selectedNodeId={selectedNodeId} selectedProjectId={selectedProjectId} onSelectNode={inspectNode} onOpenNode={openNode} onClearSelection={clearNodeFocus} delivery={delivery} traceView={traceView} cycle={cycle} />
             <div className="legend" aria-label="Graph status legend">{(["planned", "active", "passed", "changed", "failed"] as const).map((status) => <span key={status}><i className={`legend__dot legend__dot--${status}`} />{status === "passed" ? "Verified" : status}</span>)}<span className="legend__hint">Double-click a project or route to expand it</span></div>
           </Panel>
 

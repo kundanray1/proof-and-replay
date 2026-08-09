@@ -696,6 +696,26 @@ export function closeSession(root: string, sessionId: string, status: SessionSta
   writeSessions(root, sessions);
 }
 
+export function reconcileStoppedCycles(root: string, runs: readonly ProofRun[], events: readonly LedgerEvent[]): string[] {
+  const sessions = readSessions(root);
+  const finalizedRunIds: string[] = [];
+  for (const session of sessions) {
+    const latestCycle = session.cycles.at(-1);
+    for (const cycle of session.cycles) {
+      if (cycle.delivery || cycle.status !== "active") continue;
+      const run = runs.find((candidate) => candidate.id === cycle.runId);
+      const runEvents = events.filter((event) => event.runId === cycle.runId);
+      const stopped = runEvents.some((event) => event.type === "agent.stopped");
+      const superseded = latestCycle?.id !== cycle.id;
+      const explicitlyClosed = run?.status !== "running";
+      if (!stopped || (!superseded && !explicitlyClosed)) continue;
+      finalizeSessionCycle(root, cycle.runId, runEvents, run?.status === "blocked" ? "blocked" : run?.status === "detached" ? "detached" : "stopped");
+      finalizedRunIds.push(cycle.runId);
+    }
+  }
+  return finalizedRunIds;
+}
+
 export function migrateLegacySessions(root: string, runs: readonly ProofRun[], events: readonly LedgerEvent[]): SessionRecord[] {
   const existing = readSessions(root);
   if (existing.length > 0 || runs.length === 0) return existing;
