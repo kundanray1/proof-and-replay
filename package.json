@@ -13,7 +13,7 @@
     "./package.json": "./package.json"
   },
   "bin": {
-    "proof-replay": "./dist/cli.js"
+    "proof-replay": "dist/cli.js"
   },
   "files": [
     "dist",
@@ -67,7 +67,7 @@
   },
   "publishConfig": {
     "access": "public",
-    "provenance": true
+    "registry": "https://registry.npmjs.org/"
   },
   "devDependencies": {
     "@types/node": "^24.0.0",

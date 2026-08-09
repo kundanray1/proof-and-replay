@@ -6,7 +6,7 @@ Proof & Replay is configured for the public npm registry only:
 https://registry.npmjs.org/
 ```
 
-The package name is `proof-and-replay`, public access is declared in `package.json`, and provenance is enabled. A GitHub personal access token can push source code and tags to GitHub, but it cannot authenticate a publish to npmjs.com.
+The package name is `proof-and-replay`, and public access plus the npmjs.com registry are declared in `package.json`. A GitHub personal access token can push source code and tags to GitHub, but it cannot authenticate a publish to npmjs.com.
 
 ## First release
 
@@ -19,7 +19,15 @@ npm pack --dry-run
 npm publish --access public
 ```
 
-Do not commit an npm token or add one to `.npmrc`.
+This local bootstrap release does not request provenance because it is not running inside a supported CI provider. Do not commit an npm token or add one to `.npmrc`.
+
+If the npm account requires two-factor authentication, supply the current code from the account owner's authenticator directly in the terminal:
+
+```bash
+npm publish --access public --otp=123456
+```
+
+Replace `123456` with the current one-time code. Never put that code in documentation, source control, chat, or shell history intended for sharing.
 
 ## Trusted publishing from GitHub
 
