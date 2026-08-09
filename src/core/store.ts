@@ -21,13 +21,23 @@ const DEFAULT_CONFIG: ProofReplayConfig = {
     "dist",
     "build",
     "coverage",
-    ".next"
+    ".next",
+    ".worktrees",
+    ".wrangler",
+    ".turbo",
+    ".cache",
+    "test-results",
+    "playwright-report"
   ],
   proofPolicy: {
     requireReproduction: true,
     requireChange: true,
     requirePassingVerification: true,
     requireExecutedChangedNode: true
+  },
+  tokenMonitoring: {
+    sessionWarningTokens: 200_000,
+    turnSpikeTokens: 50_000
   }
 };
 
@@ -49,7 +59,14 @@ export function ensureState(root: string): StatePaths {
 
 export function readConfig(root: string): ProofReplayConfig {
   const paths = ensureState(root);
-  return JSON.parse(fs.readFileSync(paths.config, "utf8")) as ProofReplayConfig;
+  const stored = JSON.parse(fs.readFileSync(paths.config, "utf8")) as Partial<ProofReplayConfig>;
+  return {
+    ...DEFAULT_CONFIG,
+    ...stored,
+    exclude: [...new Set([...DEFAULT_CONFIG.exclude, ...(stored.exclude ?? [])])],
+    proofPolicy: { ...DEFAULT_CONFIG.proofPolicy, ...stored.proofPolicy },
+    tokenMonitoring: { ...DEFAULT_CONFIG.tokenMonitoring, ...stored.tokenMonitoring }
+  };
 }
 
 export function writeGraph(root: string, graph: RepositoryGraph): void {

@@ -10,7 +10,7 @@ Proof & Replay is a local-first evidence graph for AI-written JavaScript and Typ
 
 ![Animated Proof & Replay dashboard showing a bug-fix run](docs/assets/proof-and-replay-demo.gif)
 
-Status: focused prototype (`0.1.x`). The event schema is versioned; the package API may still evolve before `1.0.0`.
+Status: focused prototype (`0.2.x`). The event schema is versioned; the package API may still evolve before `1.0.0`.
 
 ## Install
 
@@ -76,7 +76,35 @@ The installer merges handlers into `.claude/settings.local.json` and preserves e
 npx proof-replay claude detach
 ```
 
-Claude's normal test commands are observed, but the strongest changed-function execution proof requires tests to run through `proof-replay test`, which enables V8 coverage.
+Claude's normal test commands are observed, including Playwright and Cypress. Shell commands are mapped to referenced projects and files. Claude transcript usage is sampled locally so the dashboard can show input, output, cache, and total token volume. The strongest changed-function execution proof still requires tests to run through `proof-replay test`, which enables V8 coverage.
+
+## Use the dashboard
+
+The dashboard separates repository understanding from proof evidence:
+
+- **Mental model** shows package boundaries, frameworks, file/function counts, routes, and cross-project imports. Double-click a project to expand its files, routes, functions, and active neighbors.
+- **Live scenario** turns the current agent ledger into a project-level path. Repeated operations are grouped and older shell events are inferred from paths when direct node IDs are unavailable.
+- **Routes** lists every discovered Express endpoint, middleware mount, and React Router page. Select a route to focus its handler and downstream calls.
+- **Evidence** keeps the append-only timeline and causal completion contract available without making raw commands the primary view.
+
+Use the project chips to scope any map. The `+`, `−`, and `Fit` controls zoom the graph; selecting a node centers it, and double-clicking a project or route expands that context.
+
+## Token alerts
+
+Proof & Replay reads Claude Code's local transcript metadata and records usage totals only; it does not send prompts or usage data to an external service. The dashboard always displays the last observed totals. Browser notifications are disabled by default and can be requested only by clicking **Enable token alerts**.
+
+Default warning levels are `200000` processed session tokens or a `50000`-token increase between samples. Adjust them in `.proof-replay/config.json`:
+
+```json
+{
+  "tokenMonitoring": {
+    "sessionWarningTokens": 200000,
+    "turnSpikeTokens": 50000
+  }
+}
+```
+
+The total includes input, output, cache creation, and cache-read tokens. Treat it as processed context volume, not an exact billing estimate.
 
 ## Super-repositories and monorepos
 
@@ -112,12 +140,13 @@ The default policy requires all four conditions:
 
 ## What is included
 
-- A TypeScript AST index of JavaScript and TypeScript files, functions, tests, imports, and conservatively resolvable calls
+- A TypeScript AST index of JavaScript and TypeScript projects, routes, files, functions, tests, imports, and conservatively resolvable calls
+- Inspectable confidence and evidence for inferred calls and route handlers
 - Stable graph identities for files and callable symbols
 - V8 coverage mapped back to indexed function and test nodes
 - An append-only NDJSON execution ledger
 - A causally ordered completion policy
-- A React and strict-TypeScript dashboard with proof graph, code map, inspector, live updates, and replay
+- A React and strict-TypeScript dashboard with mental-model, scenario, route, and evidence views, token monitoring, live updates, zoom, and replay
 - A Claude Code bridge plus a vendor-neutral event command
 - ESM package exports, generated declarations and source maps
 

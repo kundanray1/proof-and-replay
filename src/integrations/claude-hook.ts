@@ -5,7 +5,9 @@ import path from "node:path";
 import { appendEvent, createRun, getRun, readEvents, readGraph } from "../core/store.js";
 import { scanProject } from "../core/scanner.js";
 import { statePaths, toProjectPath } from "../core/paths.js";
-import type { ProofRun } from "../types.js";
+import { readConfig } from "../core/store.js";
+import { readClaudeTokenUsage, tokenUsageFromToolResponse } from "./token-usage.js";
+import type { ProofRun, RepositoryGraph, TokenUsage } from "../types.js";
 
 interface ClaudeHookPayload {
   session_id?: string;
@@ -21,6 +23,8 @@ interface ClaudeHookPayload {
   };
   error?: unknown;
   duration_ms?: number;
+  transcript_path?: string;
+  tool_response?: unknown;
 }
 
 interface ActiveClaudeRun {
@@ -72,11 +76,65 @@ function nodesForFile(root: string, file?: string): string[] {
   if (!file) return [];
   const relative = toProjectPath(root, path.resolve(root, file));
   const graph = readGraph(root) ?? scanProject(root);
-  return graph.nodes.filter((node) => node.file === relative).map((node) => node.id);
+  const fileNodes = graph.nodes.filter((node) => node.file === relative);
+  const projectIds = new Set(fileNodes.map((node) => node.data.projectId).filter((id): id is string => typeof id === "string"));
+  return [...new Set([...fileNodes.map((node) => node.id), ...projectIds])];
+}
+
+function commandNodes(root: string, command: string, graph: RepositoryGraph): { nodeIds: string[]; files: string[] } {
+  const normalized = command.replaceAll("\\", "/");
+  const matchedFiles = graph.nodes.filter((node) => node.kind === "file" && (
+    normalized.includes(node.file) || normalized.includes(path.resolve(root, node.file).replaceAll("\\", "/"))
+  ));
+  const matchedProjects = (graph.architecture?.projects ?? []).filter((project) => project.path !== "." && (
+    normalized.includes(`${project.path}/`) || normalized.includes(path.resolve(root, project.path).replaceAll("\\", "/"))
+  ));
+  const projectIds = new Set<string>(matchedProjects.map((project) => project.id));
+  for (const file of matchedFiles) {
+    if (typeof file.data.projectId === "string") projectIds.add(file.data.projectId);
+  }
+  if (projectIds.size === 0) {
+    const rootProject = graph.architecture?.projects.find((project) => project.path === ".");
+    if (rootProject && normalized.includes(root.replaceAll("\\", "/"))) projectIds.add(rootProject.id);
+  }
+  return {
+    nodeIds: [...new Set([...projectIds, ...matchedFiles.map((node) => node.id)])],
+    files: [...new Set(matchedFiles.map((node) => node.file))]
+  };
 }
 
 function looksLikeTest(command = ""): boolean {
-  return /(?:^|[;&|]\s*|\s)(?:npm\s+(?:run\s+)?test|pnpm\s+(?:run\s+)?test|yarn\s+test|bun\s+test|node\s+--test|pytest|uv\s+run\s+pytest|vitest|jest)(?:\s|$)/i.test(command);
+  return /(?:^|[;&|]\s*|\s)(?:npm\s+(?:run\s+)?test|pnpm\s+(?:run\s+)?test|yarn\s+test|bun\s+test|node\s+--test|pytest|uv\s+run\s+pytest|vitest|jest|(?:npx\s+)?playwright\s+test|(?:npx\s+)?cypress\s+run)(?:\s|$)/i.test(command);
+}
+
+function looksLikeMutation(command: string): boolean {
+  return /(?:apply_patch|sed\s+(?:-[^\s]*i|--in-place)|perl\s+-[^\s]*i|(?:cat|tee)\s+[^\n]*(?:>|--append)|writeFile|appendFile|renameSync|copyFile)/i.test(command);
+}
+
+function usageForPayload(payload: ClaudeHookPayload): TokenUsage | null {
+  return readClaudeTokenUsage(payload.transcript_path) ?? tokenUsageFromToolResponse(payload.tool_response);
+}
+
+function recordTokenUsage(root: string, run: ProofRun, payload: ClaudeHookPayload): void {
+  const usage = usageForPayload(payload);
+  if (!usage) return;
+  const prior = readEvents(root, run.id).filter((event) => event.type === "usage.sampled").at(-1);
+  const previousTotal = typeof prior?.data.totalTokens === "number" ? prior.data.totalTokens : 0;
+  if (usage.totalTokens === previousTotal) return;
+  const config = readConfig(root).tokenMonitoring;
+  const deltaTokens = Math.max(0, usage.totalTokens - previousTotal);
+  appendEvent(root, {
+    runId: run.id,
+    type: "usage.sampled",
+    status: "observed",
+    data: {
+      ...usage,
+      deltaTokens,
+      warning: usage.totalTokens >= config.sessionWarningTokens || deltaTokens >= config.turnSpikeTokens,
+      sessionWarningTokens: config.sessionWarningTokens,
+      turnSpikeTokens: config.turnSpikeTokens
+    }
+  });
 }
 
 function testStage(root: string, runId: string): "reproduce" | "verify" {
@@ -89,6 +147,7 @@ function record(root: string, run: ProofRun, payload: ClaudeHookPayload): void {
   const eventName = payload.hook_event_name;
   const tool = payload.tool_name;
   const input = payload.tool_input ?? {};
+  recordTokenUsage(root, run, payload);
 
   if (eventName === "UserPromptSubmit") {
     appendEvent(root, {
@@ -138,20 +197,35 @@ function record(root: string, run: ProofRun, payload: ClaudeHookPayload): void {
   if (tool === "Bash") {
     const failed = eventName === "PostToolUseFailure";
     const command = input.command ?? "";
+    const graph = readGraph(root) ?? scanProject(root);
+    const mapped = commandNodes(root, command, graph);
     appendEvent(root, {
       runId: run.id,
       type: failed ? "tool.failed" : "tool.completed",
       status: failed ? "failed" : "passed",
+      nodeIds: mapped.nodeIds,
       data: { tool, command, error: payload.error, durationMs: payload.duration_ms }
     });
+    if (!failed && mapped.files.length > 0 && looksLikeMutation(command)) {
+      scanProject(root);
+      appendEvent(root, {
+        runId: run.id,
+        type: "file.changed",
+        status: "changed",
+        nodeIds: mapped.files.flatMap((file) => nodesForFile(root, file)),
+        data: { files: mapped.files, tool, capturedBy: "claude-hook-command" }
+      });
+    }
     if (looksLikeTest(command) && !command.includes("proof-replay")) {
+      const projectIds = new Set(mapped.nodeIds.filter((id) => graph.nodes.find((node) => node.id === id)?.kind === "project"));
+      const testNodes = graph.nodes.filter((node) => node.kind === "test" && (
+        projectIds.size === 0 || (typeof node.data.projectId === "string" && projectIds.has(node.data.projectId))
+      ));
       appendEvent(root, {
         runId: run.id,
         type: "test.completed",
         status: failed ? "failed" : "passed",
-        nodeIds: (readGraph(root)?.nodes ?? [])
-          .filter((node) => node.kind === "test")
-          .map((node) => node.id),
+        nodeIds: [...mapped.nodeIds, ...testNodes.map((node) => node.id)],
         data: { command, stage: testStage(root, run.id), capturedBy: "claude-hook" }
       });
     }

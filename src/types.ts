@@ -1,4 +1,10 @@
-export type NodeKind = "file" | "function" | "test";
+export type NodeKind = "project" | "route" | "file" | "function" | "test";
+
+export type ConfidenceLevel = "high" | "medium" | "low";
+
+export type ProjectKind = "application" | "package" | "repository" | "service" | "test";
+
+export type RouteKind = "client" | "http" | "middleware" | "page";
 
 export type EventStatus =
   | "active"
@@ -26,8 +32,69 @@ export interface GraphEdge {
   id: string;
   source: string;
   target: string;
-  kind: "calls" | "contains" | "imports";
+  kind: "calls" | "contains" | "depends-on" | "handles" | "imports" | "requests";
   data: Record<string, unknown>;
+}
+
+export interface ProjectSummary {
+  id: string;
+  name: string;
+  path: string;
+  kind: ProjectKind;
+  packageName: string | null;
+  packageManager: "npm" | "pnpm" | "yarn" | null;
+  frameworks: string[];
+  entryNodeIds: string[];
+  stats: {
+    files: number;
+    functions: number;
+    tests: number;
+    routes: number;
+  };
+}
+
+export interface RouteDefinition {
+  id: string;
+  projectId: string;
+  kind: RouteKind;
+  method: string;
+  path: string;
+  file: string;
+  line: number;
+  handlerNames: string[];
+  handlerNodeIds: string[];
+  confidence: ConfidenceLevel;
+  evidence: string;
+}
+
+export interface ProjectRelationship {
+  id: string;
+  sourceProjectId: string;
+  targetProjectId: string;
+  kind: "imports";
+  count: number;
+  confidence: ConfidenceLevel;
+}
+
+export interface ArchitectureModel {
+  projects: ProjectSummary[];
+  routes: RouteDefinition[];
+  relationships: ProjectRelationship[];
+}
+
+export interface TokenUsage {
+  inputTokens: number;
+  outputTokens: number;
+  cacheCreationInputTokens: number;
+  cacheReadInputTokens: number;
+  totalTokens: number;
+  observedAt: string;
+  source: "claude-transcript" | "tool-response";
+}
+
+export interface TokenMonitoringConfig {
+  sessionWarningTokens: number;
+  turnSpikeTokens: number;
 }
 
 export interface RepositoryGraph {
@@ -36,11 +103,14 @@ export interface RepositoryGraph {
   root: string;
   nodes: GraphNode[];
   edges: GraphEdge[];
+  architecture?: ArchitectureModel;
   stats: {
     files: number;
     functions: number;
     tests: number;
     edges: number;
+    projects?: number;
+    routes?: number;
   };
 }
 
@@ -56,6 +126,7 @@ export interface ProofReplayConfig {
   sourceExtensions: string[];
   exclude: string[];
   proofPolicy: ProofPolicy;
+  tokenMonitoring: TokenMonitoringConfig;
 }
 
 export interface LedgerEventData {

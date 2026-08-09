@@ -18,17 +18,26 @@ export { attachClaude, detachClaude, installClaudeHooks } from "./integrations/c
 export { createDashboardServer } from "./server.js";
 export type {
   AppendEventInput,
+  ArchitectureModel,
+  ConfidenceLevel,
   EventStatus,
   GraphEdge,
   GraphNode,
   LedgerEvent,
   LedgerEventData,
   NodeKind,
+  ProjectKind,
+  ProjectRelationship,
+  ProjectSummary,
   ProofCheck,
   ProofPolicy,
   ProofReplayConfig,
   ProofResult,
   ProofRun,
   RepositoryGraph,
-  StatePaths
+  RouteDefinition,
+  RouteKind,
+  StatePaths,
+  TokenMonitoringConfig,
+  TokenUsage
 } from "./types.js";

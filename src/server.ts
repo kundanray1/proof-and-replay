@@ -3,7 +3,7 @@ import http from "node:http";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { evaluateProof } from "./core/proof.js";
-import { ensureState, getRun, readEvents, readGraph, readRuns } from "./core/store.js";
+import { ensureState, getRun, readConfig, readEvents, readGraph, readRuns } from "./core/store.js";
 import type { Server } from "node:http";
 import type { ServerResponse } from "node:http";
 
@@ -98,6 +98,10 @@ export function createDashboardServer(
       }
       if (url.pathname === "/api/graph") {
         sendJson(response, 200, readGraph(root) ?? { nodes: [], edges: [], stats: {} });
+        return;
+      }
+      if (url.pathname === "/api/config") {
+        sendJson(response, 200, readConfig(root));
         return;
       }
       if (url.pathname === "/api/runs") {
