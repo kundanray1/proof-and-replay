@@ -20,20 +20,20 @@ platform/
 
 Using `platform/` as the root creates one `.proof-replay/` ledger and lets import and call edges connect files across the entire checked-out tree. Running separately inside `frontend/` and `backend/` creates isolated graphs instead.
 
-## Install from GitHub
+## Install from npm
 
 Add the package to the super-repository so its hook path remains stable:
 
 ```bash
 cd platform
-npm install --save-dev github:kundanray1/proof-and-replay
+npm install --save-dev proof-and-replay
 ```
 
 For Yarn or pnpm roots:
 
 ```bash
-yarn add --dev github:kundanray1/proof-and-replay
-pnpm add --save-dev github:kundanray1/proof-and-replay
+yarn add --dev proof-and-replay
+pnpm add --save-dev proof-and-replay
 ```
 
 Commit the package manifest and lockfile. Do not commit `node_modules/` or `.proof-replay/`.
