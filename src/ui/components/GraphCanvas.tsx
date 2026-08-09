@@ -18,12 +18,12 @@ export interface DisplayNode {
   kind?: NodeKind;
 }
 
-interface PositionedNode extends DisplayNode {
+export interface PositionedNode extends DisplayNode {
   x: number;
   y: number;
 }
 
-interface DisplayEdge {
+export interface DisplayEdge {
   source: string;
   target: string;
   kind: string;
@@ -32,7 +32,7 @@ interface DisplayEdge {
   data?: Record<string, unknown>;
 }
 
-interface DisplayGraph {
+export interface DisplayGraph {
   nodes: DisplayNode[];
   edges: DisplayEdge[];
   lanes?: Array<{ id: string; label: string }>;
@@ -49,6 +49,18 @@ interface ContextBubble {
   detail: string;
 }
 
+interface PositionedBubble extends ContextBubble {
+  x: number;
+  y: number;
+}
+
+export interface GraphFocus {
+  directNodeIds: Set<string>;
+  secondaryNodeIds: Set<string>;
+  directEdgeIds: Set<string>;
+  secondaryEdgeIds: Set<string>;
+}
+
 export interface GraphCanvasProps {
   mode: GraphMode;
   graph: RepositoryGraph;
@@ -57,6 +69,7 @@ export interface GraphCanvasProps {
   selectedProjectId: string | null;
   onSelectNode: (node: DisplayNode) => void;
   onOpenNode: (node: DisplayNode) => void;
+  onClearSelection: () => void;
 }
 
 const NODE_WIDTH = 210;
@@ -130,6 +143,35 @@ function displayEdge(edge: GraphEdge, statuses: ReadonlyMap<string, EventStatus>
   };
 }
 
+function edgeIdentity(edge: Pick<DisplayEdge, "source" | "target" | "kind">): string {
+  return `${edge.source}\u0000${edge.target}\u0000${edge.kind}`;
+}
+
+export function connectedNeighborhood(edges: readonly DisplayEdge[], selectedNodeId: string | null): GraphFocus {
+  const directNodeIds = new Set<string>();
+  const secondaryNodeIds = new Set<string>();
+  const directEdgeIds = new Set<string>();
+  const secondaryEdgeIds = new Set<string>();
+  if (!selectedNodeId) return { directNodeIds, secondaryNodeIds, directEdgeIds, secondaryEdgeIds };
+  directNodeIds.add(selectedNodeId);
+  for (const edge of edges) {
+    if (edge.source !== selectedNodeId && edge.target !== selectedNodeId) continue;
+    directEdgeIds.add(edgeIdentity(edge));
+    directNodeIds.add(edge.source);
+    directNodeIds.add(edge.target);
+  }
+  for (const edge of edges) {
+    const id = edgeIdentity(edge);
+    if (directEdgeIds.has(id)) continue;
+    if (!directNodeIds.has(edge.source) && !directNodeIds.has(edge.target)) continue;
+    secondaryEdgeIds.add(id);
+    secondaryNodeIds.add(edge.source);
+    secondaryNodeIds.add(edge.target);
+  }
+  for (const id of directNodeIds) secondaryNodeIds.delete(id);
+  return { directNodeIds, secondaryNodeIds, directEdgeIds, secondaryEdgeIds };
+}
+
 function proofGraph(events: readonly LedgerEvent[]): DisplayGraph {
   const started = firstEvent(events, "task.started");
   const reproduction = firstEvent(events, "test.completed", (event) => event.data.stage === "reproduce");
@@ -166,7 +208,7 @@ function modelGraph(graph: RepositoryGraph, events: readonly LedgerEvent[], sele
 
   const project = architecture.projects.find((candidate) => candidate.id === selectedProjectId);
   if (!project) return { nodes: [], edges: [] };
-  const owned = graph.nodes.filter((node) => node.data.projectId === project.id);
+  const owned = graph.nodes.filter((node) => node.id !== project.id && node.data.projectId === project.id);
   const routeIds = new Set(architecture.routes.filter((route) => route.projectId === project.id).map((route) => route.id));
   const activeIds = new Set([...statuses.keys()]);
   const connected = new Set<string>([project.id, ...routeIds, ...project.entryNodeIds, ...activeIds]);
@@ -313,7 +355,7 @@ function scenarioGraph(graph: RepositoryGraph, events: readonly LedgerEvent[], s
   return { nodes: candidates, edges, lanes: [...laneLabels].map(([id, label]) => ({ id, label })) };
 }
 
-function layout(graph: DisplayGraph, mode: GraphMode, width: number): PositionedNode[] {
+export function layoutDisplayGraph(graph: DisplayGraph, mode: GraphMode, width: number): PositionedNode[] {
   if (mode === "scenario") {
     const lanes = graph.lanes ?? [{ id: "main", label: "Main agent" }];
     const laneIndex = new Map(lanes.map((lane, index) => [lane.id, index]));
@@ -332,17 +374,49 @@ function layout(graph: DisplayGraph, mode: GraphMode, width: number): Positioned
   const order: NodeKind[] = ["project", "route", "file", "function", "data", "test"];
   const groups = order.map((kind) => graph.nodes.filter((node) => node.kind === kind)).filter((group) => group.length > 0);
   const positions: PositionedNode[] = [];
+  const positionedX = new Map<string, number>();
+  const degree = new Map<string, number>();
+  for (const edge of graph.edges) {
+    degree.set(edge.source, (degree.get(edge.source) ?? 0) + 1);
+    degree.set(edge.target, (degree.get(edge.target) ?? 0) + 1);
+  }
+  const connectedX = (id: string): number[] => graph.edges.flatMap((edge) => {
+    if (edge.source === id && positionedX.has(edge.target)) return [positionedX.get(edge.target)!];
+    if (edge.target === id && positionedX.has(edge.source)) return [positionedX.get(edge.source)!];
+    return [];
+  });
   let bandTop = 105;
-  groups.forEach((group) => {
-    const columns = Math.min(6, Math.max(1, group.length));
-    group.forEach((node, index) => positions.push({
-      ...node,
-      x: 165 + (index % columns) * 250,
-      y: bandTop + Math.floor(index / columns) * 112
-    }));
-    bandTop += Math.ceil(group.length / columns) * 112 + 85;
+  groups.forEach((unsortedGroup) => {
+    const group = [...unsortedGroup].sort((left, right) => {
+      const leftX = connectedX(left.id);
+      const rightX = connectedX(right.id);
+      const leftCenter = leftX.length > 0 ? leftX.reduce((sum, value) => sum + value, 0) / leftX.length : Number.POSITIVE_INFINITY;
+      const rightCenter = rightX.length > 0 ? rightX.reduce((sum, value) => sum + value, 0) / rightX.length : Number.POSITIVE_INFINITY;
+      if (leftCenter !== rightCenter) return leftCenter - rightCenter;
+      const degreeDifference = (degree.get(right.id) ?? 0) - (degree.get(left.id) ?? 0);
+      return degreeDifference || left.label.localeCompare(right.label);
+    });
+    const columns = Math.min(5, Math.max(1, group.length));
+    group.forEach((node, index) => {
+      const x = 175 + (index % columns) * 295;
+      positions.push({ ...node, x, y: bandTop + Math.floor(index / columns) * 140 });
+      positionedX.set(node.id, x);
+    });
+    bandTop += Math.ceil(group.length / columns) * 140 + 110;
   });
   return positions;
+}
+
+export function countNodeCollisions(nodes: readonly PositionedNode[]): number {
+  let collisions = 0;
+  for (let leftIndex = 0; leftIndex < nodes.length; leftIndex += 1) {
+    const left = nodes[leftIndex]!;
+    for (let rightIndex = leftIndex + 1; rightIndex < nodes.length; rightIndex += 1) {
+      const right = nodes[rightIndex]!;
+      if (Math.abs(left.x - right.x) < NODE_WIDTH + 24 && Math.abs(left.y - right.y) < NODE_HEIGHT + 24) collisions += 1;
+    }
+  }
+  return collisions;
 }
 
 function bounds(nodes: readonly PositionedNode[]): { left: number; top: number; right: number; bottom: number } {
@@ -366,11 +440,6 @@ function contextBubbles(selected: PositionedNode | undefined, graph: RepositoryG
     if (parameters.length > 0) result.push({ label: "Parameters", detail: parameters.join(", ") });
     if (typeof source.data.returns === "string") result.push({ label: "Returns", detail: source.data.returns });
     if (fields.length > 0) result.push({ label: "Data fields", detail: fields.slice(0, 4).join(" · ") });
-    for (const edge of graph.edges.filter((item) => item.source === sourceId || item.target === sourceId).slice(0, 5)) {
-      const outgoing = edge.source === sourceId;
-      const other = graph.nodes.find((node) => node.id === (outgoing ? edge.target : edge.source));
-      if (other) result.push({ label: outgoing ? edgeLabel(edge) : `called by · ${edgeLabel(edge)}`, detail: other.label });
-    }
   }
   const eventData = selected.event?.data;
   if (eventData) {
@@ -390,6 +459,70 @@ function contextBubbles(selected: PositionedNode | undefined, graph: RepositoryG
   return result.slice(0, 7);
 }
 
+function rectanglesOverlap(
+  left: { x: number; y: number; width: number; height: number },
+  right: { x: number; y: number; width: number; height: number },
+  padding = 14
+): boolean {
+  return Math.abs(left.x - right.x) < (left.width + right.width) / 2 + padding
+    && Math.abs(left.y - right.y) < (left.height + right.height) / 2 + padding;
+}
+
+function positionContextBubbles(selected: PositionedNode | undefined, nodes: readonly PositionedNode[], bubbles: readonly ContextBubble[]): PositionedBubble[] {
+  if (!selected || bubbles.length === 0) return [];
+  const candidates: Array<{ x: number; y: number }> = [];
+  for (const radius of [1, 1.65, 2.3]) {
+    for (const [x, y] of [[-250, -125], [250, -125], [-270, 0], [270, 0], [-250, 125], [250, 125], [0, -175], [0, 175]] as const) {
+      candidates.push({ x: selected.x + x * radius, y: selected.y + y * radius });
+    }
+  }
+  const occupied = nodes.map((node) => ({ x: node.x, y: node.y, width: NODE_WIDTH, height: NODE_HEIGHT }));
+  const result: PositionedBubble[] = [];
+  for (const bubble of bubbles) {
+    const candidate = candidates.find((position) => {
+      const rectangle = { ...position, width: BUBBLE_WIDTH, height: BUBBLE_HEIGHT };
+      return !occupied.some((item) => rectanglesOverlap(rectangle, item))
+        && !result.some((item) => rectanglesOverlap(rectangle, { x: item.x, y: item.y, width: BUBBLE_WIDTH, height: BUBBLE_HEIGHT }, 8));
+    });
+    if (!candidate) break;
+    result.push({ ...bubble, ...candidate });
+    candidates.splice(candidates.indexOf(candidate), 1);
+  }
+  return result;
+}
+
+export interface RoutedEdge {
+  path: string;
+  labelX: number;
+  labelY: number;
+}
+
+export function routeDisplayEdge(source: PositionedNode, target: PositionedNode, index: number): RoutedEdge {
+  const horizontalDistance = target.x - source.x;
+  const verticalDistance = target.y - source.y;
+  const portOffset = ((index % 5) - 2) * 7;
+  if (Math.abs(verticalDistance) > Math.max(90, Math.abs(horizontalDistance) * 0.52)) {
+    const direction = Math.sign(verticalDistance) || 1;
+    const sourceY = source.y + direction * NODE_HEIGHT / 2;
+    const targetY = target.y - direction * NODE_HEIGHT / 2;
+    const middleY = (sourceY + targetY) / 2;
+    return {
+      path: `M ${source.x + portOffset} ${sourceY} C ${source.x + portOffset} ${middleY}, ${target.x + portOffset} ${middleY}, ${target.x + portOffset} ${targetY}`,
+      labelX: (source.x + target.x) / 2 + portOffset,
+      labelY: middleY - 7
+    };
+  }
+  const direction = Math.sign(horizontalDistance) || 1;
+  const sourceX = source.x + direction * NODE_WIDTH / 2;
+  const targetX = target.x - direction * NODE_WIDTH / 2;
+  const middleX = (sourceX + targetX) / 2;
+  return {
+    path: `M ${sourceX} ${source.y + portOffset} C ${middleX} ${source.y + portOffset}, ${middleX} ${target.y + portOffset}, ${targetX} ${target.y + portOffset}`,
+    labelX: middleX,
+    labelY: (source.y + target.y) / 2 - 7 + portOffset
+  };
+}
+
 function activateWithKeyboard(event: KeyboardEvent<SVGGElement>, action: () => void): void {
   if (event.key === "Enter" || event.key === " ") {
     event.preventDefault();
@@ -401,7 +534,7 @@ function clamp(value: number, minimum: number, maximum: number): number {
   return Math.min(maximum, Math.max(minimum, value));
 }
 
-export function GraphCanvas({ mode, graph, events, selectedNodeId, selectedProjectId, onSelectNode, onOpenNode }: GraphCanvasProps): JSX.Element {
+export function GraphCanvas({ mode, graph, events, selectedNodeId, selectedProjectId, onSelectNode, onOpenNode, onClearSelection }: GraphCanvasProps): JSX.Element {
   const containerRef = useRef<HTMLDivElement>(null);
   const pointers = useRef(new Map<number, { x: number; y: number }>());
   const gesture = useRef<{ center: { x: number; y: number }; distance: number } | null>(null);
@@ -421,10 +554,12 @@ export function GraphCanvas({ mode, graph, events, selectedNodeId, selectedProje
   }, []);
 
   const displayGraph = useMemo(() => mode === "proof" ? proofGraph(events) : mode === "model" ? modelGraph(graph, events, selectedProjectId) : mode === "routes" ? routesGraph(graph, events, selectedProjectId, selectedNodeId) : scenarioGraph(graph, events, selectedProjectId), [events, graph, mode, selectedNodeId, selectedProjectId]);
-  const nodes = useMemo(() => layout(displayGraph, mode, size.width), [displayGraph, mode, size.width]);
+  const nodes = useMemo(() => layoutDisplayGraph(displayGraph, mode, size.width), [displayGraph, mode, size.width]);
   const byId = useMemo(() => new Map(nodes.map((node) => [node.id, node])), [nodes]);
   const selected = selectedNodeId ? byId.get(selectedNodeId) : undefined;
+  const focus = useMemo(() => connectedNeighborhood(displayGraph.edges, selected?.id ?? null), [displayGraph.edges, selected?.id]);
   const bubbles = useMemo(() => contextBubbles(selected, graph), [graph, selected]);
+  const positionedBubbles = useMemo(() => positionContextBubbles(selected, nodes, bubbles), [bubbles, nodes, selected]);
   const contentBounds = useMemo(() => bounds(nodes), [nodes]);
 
   const fit = useCallback(() => {
@@ -445,7 +580,22 @@ export function GraphCanvas({ mode, graph, events, selectedNodeId, selectedProje
       return;
     }
     fit();
-  }, [fit, mode, selectedProjectId]);
+  }, [mode, nodes.length, selectedProjectId, size.height, size.width]);
+
+  useEffect(() => {
+    if (!selectedNodeId || !selected || selected.kind === "project") return;
+    const related = nodes.filter((node) => focus.directNodeIds.has(node.id));
+    if (related.length === 0) return;
+    const relatedBounds = bounds(related);
+    const focusWidth = Math.max(1, relatedBounds.right - relatedBounds.left);
+    const focusHeight = Math.max(1, relatedBounds.bottom - relatedBounds.top);
+    const scale = clamp(Math.min((size.width - 240) / focusWidth, (size.height - 220) / focusHeight), 0.55, 1.25);
+    setView({
+      scale,
+      x: (size.width - focusWidth * scale) / 2 - relatedBounds.left * scale,
+      y: (size.height - focusHeight * scale) / 2 - relatedBounds.top * scale
+    });
+  }, [focus.directNodeIds, nodes, selected, selectedNodeId, size.height, size.width]);
 
   const zoomAt = useCallback((nextScale: number, screenX = size.width / 2, screenY = size.height / 2) => {
     setView((current) => {
@@ -502,21 +652,26 @@ export function GraphCanvas({ mode, graph, events, selectedNodeId, selectedProje
   };
 
   const lanePositions = new Map((displayGraph.lanes ?? []).map((lane, index) => [lane.id, 125 + index * 165]));
+  const hasFocus = Boolean(selected);
+  const directlyConnectedCount = Math.max(0, focus.directNodeIds.size - 1);
 
   return (
-    <div className={`graph-canvas ${panning ? "is-panning" : ""}`} ref={containerRef}>
+    <div className={`graph-canvas ${panning ? "is-panning" : ""} ${hasFocus ? "has-focus" : ""}`} ref={containerRef}>
       <div className="zoom-controls" aria-label="Graph zoom controls">
         <button type="button" onClick={() => zoomAt(view.scale + 0.2)} aria-label="Zoom in">+</button>
         <button type="button" onClick={() => zoomAt(view.scale - 0.2)} aria-label="Zoom out">−</button>
         <button type="button" onClick={fit}>Fit</button>
         <span>{Math.round(view.scale * 100)}%</span>
       </div>
-      <div className="canvas-help">Drag to pan · wheel or pinch to zoom · select for context</div>
+      {hasFocus ? <div className="graph-focus-summary"><span>{directlyConnectedCount} connected</span><button type="button" onClick={onClearSelection}>Clear focus</button></div> : null}
+      <div className="canvas-help">Drag to pan · wheel or pinch to zoom · select to trace relationships</div>
       <svg viewBox={`0 0 ${size.width} ${size.height}`} role="img" aria-labelledby="graph-heading graph-description" onWheel={onWheel} onPointerDown={onPointerDown} onPointerMove={onPointerMove} onPointerUp={onPointerEnd} onPointerCancel={onPointerEnd}>
         <desc id="graph-description">Interactive repository architecture and workflow trace. Drag to pan and use the wheel or pinch gesture to zoom.</desc>
         <defs>
           <marker id="graph-arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse"><path d="M 0 0 L 10 5 L 0 10 z" className="graph-arrow" /></marker>
+          <marker id="graph-arrow-focus" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M 0 0 L 10 5 L 0 10 z" className="graph-arrow graph-arrow--focus" /></marker>
         </defs>
+        <rect className="graph-hitarea" width={size.width} height={size.height} onDoubleClick={onClearSelection} />
         <g transform={`translate(${view.x} ${view.y}) scale(${view.scale})`}>
           {(displayGraph.lanes ?? []).map((lane) => {
             const y = lanePositions.get(lane.id) ?? 0;
@@ -526,28 +681,24 @@ export function GraphCanvas({ mode, graph, events, selectedNodeId, selectedProje
             const source = byId.get(edge.source);
             const target = byId.get(edge.target);
             if (!source || !target) return null;
-            const sourceX = source.x + NODE_WIDTH / 2;
-            const targetX = target.x - NODE_WIDTH / 2;
-            const middle = (sourceX + targetX) / 2;
-            const pathData = `M ${sourceX} ${source.y} C ${middle} ${source.y}, ${middle} ${target.y}, ${targetX} ${target.y}`;
-            return <g key={`${edge.source}:${edge.target}:${index}`} className={`graph-edge-group graph-edge-group--${edge.kind}`}><path d={pathData} className={`graph-edge ${edge.active ? "is-active" : ""}`} markerEnd="url(#graph-arrow)" /><text x={middle} y={(source.y + target.y) / 2 - 7}>{shorten(edge.label, 24)}</text></g>;
+            const routed = routeDisplayEdge(source, target, index);
+            const id = edgeIdentity(edge);
+            const direct = focus.directEdgeIds.has(id);
+            const secondary = focus.secondaryEdgeIds.has(id);
+            const focusClass = direct ? "is-focused" : secondary ? "is-secondary" : hasFocus ? "is-muted" : "";
+            return <g key={`${edge.source}:${edge.target}:${index}`} className={`graph-edge-group graph-edge-group--${edge.kind} ${focusClass}`}><path d={routed.path} className={`graph-edge ${edge.active ? "is-active" : ""}`} markerEnd={direct ? "url(#graph-arrow-focus)" : "url(#graph-arrow)"} /><text x={routed.labelX} y={routed.labelY}>{shorten(edge.label, 24)}</text></g>;
           })}
-          {bubbles.map((bubble, index) => {
-            if (!selected) return null;
-            const angle = (-Math.PI * 0.75) + index * (Math.PI * 1.5 / Math.max(1, bubbles.length - 1));
-            const x = selected.x + Math.cos(angle) * 245;
-            const y = selected.y + Math.sin(angle) * 145;
-            return <g key={`${bubble.label}:${index}`} className="context-bubble"><line x1={selected.x} y1={selected.y} x2={x} y2={y} /><rect x={x - BUBBLE_WIDTH / 2} y={y - BUBBLE_HEIGHT / 2} width={BUBBLE_WIDTH} height={BUBBLE_HEIGHT} rx="12" /><text className="context-bubble__label" x={x - BUBBLE_WIDTH / 2 + 10} y={y - 4}>{shorten(bubble.label.toUpperCase(), 23)}</text><text className="context-bubble__detail" x={x - BUBBLE_WIDTH / 2 + 10} y={y + 12}>{shorten(bubble.detail, 30)}</text></g>;
-          })}
-          {nodes.map((node) => (
-            <g key={node.id} transform={`translate(${node.x - NODE_WIDTH / 2} ${node.y - NODE_HEIGHT / 2})`} className={`graph-node graph-node--${node.status} graph-node--kind-${node.kind ?? "evidence"} ${selectedNodeId === node.id ? "is-selected" : ""}`} role="button" tabIndex={0} aria-label={`${node.label}, ${node.status}`} onPointerDown={(event) => event.stopPropagation()} onClick={() => onSelectNode(node)} onDoubleClick={() => onOpenNode(node)} onKeyDown={(event) => activateWithKeyboard(event, () => onSelectNode(node))}>
+          {nodes.map((node) => {
+            const focusClass = selectedNodeId === node.id ? "is-selected" : focus.directNodeIds.has(node.id) ? "is-related" : focus.secondaryNodeIds.has(node.id) ? "is-secondary" : hasFocus ? "is-muted" : "";
+            return <g key={node.id} transform={`translate(${node.x - NODE_WIDTH / 2} ${node.y - NODE_HEIGHT / 2})`} className={`graph-node graph-node--${node.status} graph-node--kind-${node.kind ?? "evidence"} ${focusClass}`} role="button" tabIndex={0} aria-label={`${node.label}, ${node.status}`} onPointerDown={(event) => event.stopPropagation()} onClick={() => onSelectNode(node)} onDoubleClick={() => onOpenNode(node)} onKeyDown={(event) => activateWithKeyboard(event, () => onSelectNode(node))}>
               <rect width={NODE_WIDTH} height={NODE_HEIGHT} rx="14" />
               <circle className="graph-node__status" cx="18" cy="20" r="5" />
               <text className="graph-node__kicker" x="31" y="23">{shorten(node.kicker.toUpperCase(), 28)}</text>
               <text className="graph-node__label" x="14" y="49">{shorten(node.label, 31)}</text>
               {node.subtitle ? <text className="graph-node__subtitle" x="14" y="69">{shorten(node.subtitle, 38)}</text> : null}
-            </g>
-          ))}
+            </g>;
+          })}
+          {positionedBubbles.map((bubble, index) => selected ? <g key={`${bubble.label}:${index}`} className="context-bubble"><line x1={selected.x} y1={selected.y} x2={bubble.x} y2={bubble.y} /><rect x={bubble.x - BUBBLE_WIDTH / 2} y={bubble.y - BUBBLE_HEIGHT / 2} width={BUBBLE_WIDTH} height={BUBBLE_HEIGHT} rx="12" /><text className="context-bubble__label" x={bubble.x - BUBBLE_WIDTH / 2 + 10} y={bubble.y - 4}>{shorten(bubble.label.toUpperCase(), 23)}</text><text className="context-bubble__detail" x={bubble.x - BUBBLE_WIDTH / 2 + 10} y={bubble.y + 12}>{shorten(bubble.detail, 30)}</text></g> : null)}
         </g>
       </svg>
       {displayGraph.nodes.length === 0 ? <EmptyState title="No map available" description="Scan the repository to build its project, route, file, function, and data model graph." /> : null}

@@ -1469,6 +1469,42 @@ p {
 .graph-canvas.is-panning svg { cursor: grabbing; }
 .graph-canvas.is-panning .graph-node { cursor: grabbing; }
 
+.graph-hitarea {
+  fill: transparent;
+}
+
+.graph-focus-summary {
+  position: absolute;
+  z-index: 4;
+  top: 48px;
+  right: var(--space-2);
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  padding: 4px 5px 4px 9px;
+  border: 1px solid rgb(117 153 255 / 32%);
+  border-radius: var(--radius);
+  background: rgb(13 16 20 / 93%);
+  box-shadow: 0 8px 24px rgb(0 0 0 / 22%);
+  color: var(--blue);
+  font-size: 8px;
+  font-weight: 750;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+}
+
+.graph-focus-summary button {
+  height: 24px;
+  padding: 0 7px;
+  border: 0;
+  border-radius: 6px;
+  background: rgb(117 153 255 / 12%);
+  color: var(--foreground);
+  cursor: pointer;
+  font-size: 8px;
+  font-weight: 700;
+}
+
 .canvas-help {
   position: absolute;
   z-index: 3;
@@ -1493,13 +1529,51 @@ p {
   font: 700 8px ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
   text-anchor: middle;
   text-transform: uppercase;
+  opacity: 0;
+  transition: opacity 130ms ease;
 }
 
-.graph-edge-group--calls .graph-edge,
-.graph-edge-group--handles .graph-edge { stroke: var(--blue); }
-.graph-edge-group--uses-data .graph-edge { stroke: var(--purple); }
-.graph-edge-group--requests .graph-edge { stroke: var(--green); }
-.graph-edge-group--spawns .graph-edge { stroke: var(--orange); stroke-width: 2; }
+.graph-edge-group {
+  opacity: 0.24;
+  transition: opacity 150ms ease;
+}
+
+.graph-edge {
+  stroke: rgb(135 145 160 / 62%);
+  stroke-width: 1.1;
+  transition: opacity 150ms ease, stroke 150ms ease, stroke-width 150ms ease;
+}
+
+.graph-edge.is-active {
+  stroke: rgb(135 145 160 / 68%);
+  stroke-dasharray: none;
+  animation: none;
+}
+
+.graph-canvas.has-focus .graph-edge-group.is-muted { opacity: 0.018; }
+.graph-canvas.has-focus .graph-edge-group.is-secondary { opacity: 0.2; }
+.graph-canvas.has-focus .graph-edge-group.is-focused { opacity: 1; }
+
+.graph-edge-group.is-focused .graph-edge {
+  stroke: var(--blue);
+  stroke-width: 2.5;
+  filter: drop-shadow(0 0 5px rgb(117 153 255 / 48%));
+}
+
+.graph-edge-group.is-focused .graph-edge.is-active {
+  stroke-dasharray: 7 5;
+  animation: graph-dash 1s linear infinite;
+}
+
+.graph-edge-group.is-focused text {
+  fill: var(--foreground);
+  opacity: 1;
+}
+
+.graph-edge-group--uses-data.is-focused .graph-edge { stroke: var(--purple); }
+.graph-edge-group--requests.is-focused .graph-edge { stroke: var(--green); }
+.graph-edge-group--spawns.is-focused .graph-edge { stroke: var(--orange); stroke-width: 2.8; }
+.graph-arrow--focus { fill: var(--blue); }
 
 .workflow-lane line {
   stroke: rgb(111 120 132 / 17%);
@@ -1537,6 +1611,37 @@ p {
 .context-bubble__detail {
   fill: var(--foreground);
   font-size: 8px;
+}
+
+.graph-node {
+  transition: opacity 150ms ease, filter 150ms ease;
+}
+
+.graph-canvas.has-focus .graph-node.is-muted {
+  opacity: 0.09;
+  filter: saturate(0.25);
+}
+
+.graph-canvas.has-focus .graph-node.is-secondary {
+  opacity: 0.34;
+}
+
+.graph-node.is-related rect {
+  stroke: rgb(117 153 255 / 82%);
+  stroke-width: 1.8;
+}
+
+.graph-node.is-related {
+  filter: drop-shadow(0 0 7px rgb(117 153 255 / 18%));
+}
+
+.graph-node.is-selected rect {
+  stroke: #f4f7fb;
+  stroke-width: 2.4;
+}
+
+.graph-node.is-selected {
+  filter: drop-shadow(0 0 10px rgb(117 153 255 / 42%));
 }
 
 .graph-node rect { fill: #171b22; }

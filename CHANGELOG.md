@@ -8,6 +8,21 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 No unreleased changes.
 
+## [0.3.1] - 2026-08-09
+
+### Added
+
+- Connected-neighborhood focus that spotlights the selected node, its direct relationships, and a quieter second-hop context while muting unrelated graph content.
+- Automatic framing of a selected subgraph, a visible connected-node count, and an explicit clear-focus action.
+- Regression tests for dense layout collisions and first- and second-hop relationship selection.
+
+### Changed
+
+- Architecture bands use wider collision-free spacing, connection-aware ordering, and vertical or horizontal edge routing based on node geometry.
+- Relationship labels and animated edge treatments appear on focused paths instead of competing across the entire graph.
+- Context bubbles avoid repository cards and reserve the relationship view for real connected nodes.
+- Project scope changes no longer preselect every project relationship, and duplicate project-root cards are removed.
+
 ## [0.3.0] - 2026-08-09
 
 ### Added
@@ -53,7 +68,8 @@ No unreleased changes.
 - Vendor-neutral event command and programmatic package API.
 - Demonstration project, generic multi-monorepo integration guide, automated tests, and CI.
 
-[Unreleased]: https://github.com/kundanray1/proof-and-replay/compare/v0.3.0...HEAD
+[Unreleased]: https://github.com/kundanray1/proof-and-replay/compare/v0.3.1...HEAD
+[0.3.1]: https://github.com/kundanray1/proof-and-replay/compare/v0.3.0...v0.3.1
 [0.3.0]: https://github.com/kundanray1/proof-and-replay/compare/v0.2.0...v0.3.0
 [0.2.0]: https://github.com/kundanray1/proof-and-replay/compare/v0.1.0...v0.2.0
 [0.1.0]: https://github.com/kundanray1/proof-and-replay/releases/tag/v0.1.0

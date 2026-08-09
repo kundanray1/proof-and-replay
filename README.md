@@ -87,7 +87,7 @@ The dashboard separates repository understanding from proof evidence:
 - **Routes** lists every discovered Express endpoint, middleware mount, and React Router page. Select a route to focus its handler, downstream calls, argument expressions, and referenced data models.
 - **Evidence** keeps the append-only timeline and causal completion contract available without making raw commands the primary view.
 
-The canvas is the primary surface. Drag it with a mouse or pointer, use the wheel or a pinch gesture to zoom, and use `Fit` to restore the whole path. The Projects and Details controls hide or reveal compact edge overlays. Selecting a node opens relationship bubbles around it for callers, callees, parameters, return types, data models, workflow ownership, and recorded changes.
+The canvas is the primary surface. Drag it with a mouse or pointer, use the wheel or a pinch gesture to zoom, and use `Fit` to restore the whole path. The Projects and Details controls hide or reveal compact edge overlays. Selecting a node automatically frames and lights its direct connected nodes and relationship paths, retains a quieter second-hop context, and mutes unrelated graph content. Parameters, return types, data fields, workflow ownership, and recorded changes appear in collision-aware context bubbles; use **Clear focus** or double-click empty canvas space to return to the full map.
 
 ### Function execution and changes
 

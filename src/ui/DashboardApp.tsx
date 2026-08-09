@@ -293,6 +293,11 @@ export function DashboardApp(): JSX.Element {
     });
   }, [graph, visibleEvents]);
 
+  const clearNodeFocus = useCallback((): void => {
+    setSelectedNodeId(null);
+    setInspector(DEFAULT_INSPECTOR);
+  }, []);
+
   const openNode = useCallback((node: DisplayNode): void => {
     inspectNode(node);
     if (node.kind === "project") setSelectedProjectId(node.id);
@@ -311,7 +316,7 @@ export function DashboardApp(): JSX.Element {
 
   const selectProject = (projectId: string | null): void => {
     setSelectedProjectId(projectId);
-    setSelectedNodeId(projectId);
+    setSelectedNodeId(null);
     setInspector(DEFAULT_INSPECTOR);
   };
 
@@ -396,7 +401,7 @@ export function DashboardApp(): JSX.Element {
               {selectedProjectId ? <Button variant="ghost" size="small" onClick={() => selectProject(null)}>← Whole repository</Button> : null}
               <Button variant="secondary" size="small" busy={replaying} leadingIcon={<PlayIcon />} onClick={() => { setMode("scenario"); setReplayCount(0); }} disabled={events.length === 0}>{replaying ? "Replaying" : "Replay run"}</Button>
             </div>
-            <GraphCanvas mode={mode} graph={graph} events={visibleEvents} selectedNodeId={selectedNodeId} selectedProjectId={selectedProjectId} onSelectNode={inspectNode} onOpenNode={openNode} />
+            <GraphCanvas mode={mode} graph={graph} events={visibleEvents} selectedNodeId={selectedNodeId} selectedProjectId={selectedProjectId} onSelectNode={inspectNode} onOpenNode={openNode} onClearSelection={clearNodeFocus} />
             <div className="legend" aria-label="Graph status legend">{(["planned", "active", "passed", "changed", "failed"] as const).map((status) => <span key={status}><i className={`legend__dot legend__dot--${status}`} />{status === "passed" ? "Verified" : status}</span>)}<span className="legend__hint">Double-click a project or route to expand it</span></div>
           </Panel>
 
