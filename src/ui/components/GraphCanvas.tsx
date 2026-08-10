@@ -600,13 +600,14 @@ export function scenarioGraph(graph: RepositoryGraph, events: readonly LedgerEve
     const countByLane = new Map<string, number>();
     for (const node of candidates) {
       const laneId = String(node.data?.laneId ?? mainLane);
-      const agent = cycle.agents.find((candidate) => candidate.externalAgentId === laneId || candidate.id === node.event?.agentRunId);
+      const agent = cycle.agents.find((candidate) => candidate.externalAgentId === laneId)
+        ?? cycle.agents.find((candidate) => candidate.id === node.event?.agentRunId);
       addLane(laneId, laneId === mainLane ? "Main agent" : agent?.description ?? agent?.agentType ?? `Agent ${laneId.slice(0, 8)}`);
       const laneCount = countByLane.get(laneId) ?? 0;
       node.data = { ...node.data, laneId, column: 3 + laneCount };
       countByLane.set(laneId, laneCount + 1);
       nodes.push(node);
-      const owner = node.event?.agentRunId ? lifecycleNodeId("agent", node.event.agentRunId) : node.event?.workflowRunId ? lifecycleNodeId("workflow", node.event.workflowRunId) : node.event?.promptId ? lifecycleNodeId("prompt", node.event.promptId) : cycleId;
+      const owner = agent ? lifecycleNodeId("agent", agent.id) : node.event?.workflowRunId ? lifecycleNodeId("workflow", node.event.workflowRunId) : node.event?.promptId ? lifecycleNodeId("prompt", node.event.promptId) : cycleId;
       addEdge(lastByLane.get(laneId) ?? owner, node.id, lastByLane.has(laneId) ? "next" : "acts", lastByLane.has(laneId) ? "next" : "acts");
       lastByLane.set(laneId, node.id);
     }

@@ -12,7 +12,7 @@ import {
   type DisplayGraph,
   type DisplayNode
 } from "../src/ui/components/GraphCanvas.js";
-import type { PromptCycleRecord, RepositoryGraph } from "../src/types.js";
+import type { LedgerEvent, PromptCycleRecord, RepositoryGraph } from "../src/types.js";
 
 function node(id: string, kind: NonNullable<DisplayNode["kind"]>): DisplayNode {
   return { id, kind, label: id, kicker: kind, status: "planned" };
@@ -53,6 +53,36 @@ test("scenario selection retains the complete directed path as new nodes are app
   assert.equal(focus.directEdgeIds.size, 5);
   assert.equal(focus.directNodeIds.has("sibling"), false);
   assert.equal(focus.directNodeIds.has("unrelated"), false);
+});
+
+test("a nested agent owns the live event lane created by its spawn event", () => {
+  const repository: RepositoryGraph = {
+    schemaVersion: 1, generatedAt: "now", root: "/repo", nodes: [], edges: [],
+    stats: { files: 0, functions: 0, tests: 0, edges: 0, projects: 0, routes: 0 }
+  };
+  const cycle: PromptCycleRecord = {
+    id: "cycle", runId: "run", ordinal: 1, parentCycleId: null, prompt: "Implement fix", startedAt: "start", stoppedAt: null, status: "active",
+    baseline: { capturedAt: "start", head: null, workingTreeHash: "a", dirtyFiles: [] },
+    prompts: [{ id: "prompt", parentPromptId: null, agentRunId: "main", workflowRunId: null, kind: "user", text: "Implement fix", startedAt: "start", stoppedAt: null, status: "active", deliveredNodeIds: [] }],
+    workflows: [],
+    agents: [
+      { id: "main", externalAgentId: "main-lane", parentAgentRunId: null, parentPromptId: "prompt", workflowRunId: null, agentType: "main", model: null, description: "Main", startedAt: "start", stoppedAt: null, status: "active", tokenUsage: 0 },
+      { id: "child", externalAgentId: "child-lane", parentAgentRunId: "main", parentPromptId: "prompt", workflowRunId: null, agentType: "worker", model: null, description: "Worker", startedAt: "start", stoppedAt: null, status: "active", tokenUsage: 0 }
+    ],
+    skills: [], hooks: [], interactions: [], delivery: null
+  };
+  const event = (id: string, seq: number, type: string, agentRunId: string): LedgerEvent => ({
+    schemaVersion: 2, id, seq, timestamp: "now", runId: "run", sessionId: "session", cycleId: "cycle", promptId: "prompt", workflowRunId: null,
+    agentRunId, parentEventId: null, type, status: "passed", nodeIds: [], data: { laneId: "child-lane" }
+  });
+
+  const display = scenarioGraph(repository, [event("spawn", 1, "agent.spawned", "main"), event("work", 2, "tool.completed", "child")], null, cycle, "exploration");
+  const childId = "lifecycle:agent:child";
+  assert.ok(display.edges.some((edge) => edge.source === childId && edge.target === "scenario:spawn"));
+  assert.ok(display.edges.some((edge) => edge.source === "scenario:spawn" && edge.target === "scenario:work"));
+  const focus = connectedExecutionPath(display.edges, childId);
+  assert.ok(focus.directNodeIds.has("scenario:spawn"));
+  assert.ok(focus.directNodeIds.has("scenario:work"));
 });
 
 test("dense architecture bands remain collision free", () => {

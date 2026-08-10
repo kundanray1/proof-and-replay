@@ -8,7 +8,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ### Changed
 
-- Scenario selection now highlights the complete directed execution path from its cycle and prompt ancestors through every newly appended descendant, while unrelated sibling branches remain muted.
+- Scenario selection now highlights the complete directed execution path from its cycle and prompt ancestors through every newly appended descendant, while unrelated sibling branches remain muted. Spawn events establish ownership of nested-agent lanes so their live tool and change events remain connected.
 
 ## [0.4.1] - 2026-08-09
 
