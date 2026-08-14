@@ -49,7 +49,7 @@ export interface DisplayGraph {
   lanes?: Array<{ id: string; label: string }>;
 }
 
-interface ViewTransform {
+export interface ViewTransform {
   x: number;
   y: number;
   scale: number;
@@ -92,6 +92,23 @@ const BUBBLE_WIDTH = 156;
 const BUBBLE_HEIGHT = 44;
 const MIN_SCALE = 0.3;
 const MAX_SCALE = 2.8;
+
+export function followNodeIntoView(
+  current: ViewTransform,
+  node: Pick<PositionedNode, "x" | "y">,
+  size: { width: number; height: number }
+): ViewTransform {
+  const screenX = node.x * current.scale + current.x;
+  const screenY = node.y * current.scale + current.y;
+  const outsideX = screenX < 120 || screenX > size.width - 150;
+  const outsideY = screenY < 110 || screenY > size.height - 90;
+  if (!outsideX && !outsideY) return current;
+  return {
+    ...current,
+    x: outsideX ? current.x + size.width * 0.72 - screenX : current.x,
+    y: outsideY ? current.y + size.height * 0.52 - screenY : current.y
+  };
+}
 
 function shorten(value: string, limit: number): string {
   return value.length > limit ? `${value.slice(0, limit - 1)}…` : value;
@@ -814,6 +831,12 @@ export function GraphCanvas({ mode, graph, events, selectedNodeId, selectedProje
   const [size, setSize] = useState({ width: 1000, height: 720 });
   const [view, setView] = useState<ViewTransform>({ x: 30, y: 30, scale: 1 });
   const [panning, setPanning] = useState(false);
+  const framedContextRef = useRef<string | null>(null);
+  const focusedSelectionRef = useRef<string | null>(null);
+  const followContextRef = useRef<string | null>(null);
+  const knownNodeIdsRef = useRef<Set<string>>(new Set());
+  const positionContextRef = useRef<string | null>(null);
+  const positionMemoryRef = useRef(new Map<string, { x: number; y: number; laneId: string }>());
 
   useLayoutEffect(() => {
     const container = containerRef.current;
@@ -826,8 +849,34 @@ export function GraphCanvas({ mode, graph, events, selectedNodeId, selectedProje
     return () => observer.disconnect();
   }, []);
 
+  const viewportContext = `${mode}:${selectedProjectId ?? "all"}:${mode === "scenario" ? cycle?.runId ?? "none" : "static"}`;
   const displayGraph = useMemo(() => mode === "proof" ? proofGraph(events) : mode === "model" ? modelGraph(graph, events, selectedProjectId, delivery) : mode === "routes" ? routesGraph(graph, events, selectedProjectId, selectedNodeId) : scenarioGraph(graph, events, selectedProjectId, cycle, traceView, selectedNodeId), [cycle, delivery, events, graph, mode, selectedNodeId, selectedProjectId, traceView]);
-  const nodes = useMemo(() => layoutDisplayGraph(displayGraph, mode, size.width), [displayGraph, mode, size.width]);
+  const rawNodes = useMemo(() => layoutDisplayGraph(displayGraph, mode, size.width), [displayGraph, mode, size.width]);
+  const nodes = useMemo(() => {
+    if (mode !== "scenario") return rawNodes;
+    if (positionContextRef.current !== viewportContext) {
+      positionContextRef.current = viewportContext;
+      positionMemoryRef.current.clear();
+    }
+    const memory = positionMemoryRef.current;
+    const positioned = rawNodes.map((node) => {
+      const existing = memory.get(node.id);
+      if (existing) return { ...node, x: existing.x, y: existing.y };
+      const laneId = String(node.data?.laneId ?? "main");
+      let x = node.x;
+      if (node.event) {
+        const laneMaximum = Math.max(-Infinity, ...[...memory.values()].filter((item) => item.laneId === laneId).map((item) => item.x));
+        if (Number.isFinite(laneMaximum)) x = Math.max(x, laneMaximum + 245);
+      }
+      memory.set(node.id, { x, y: node.y, laneId });
+      return { ...node, x };
+    });
+    if (memory.size > 600) {
+      const visible = new Set(positioned.map((node) => node.id));
+      for (const id of memory.keys()) if (!visible.has(id) && memory.size > 400) memory.delete(id);
+    }
+    return positioned;
+  }, [mode, rawNodes, viewportContext]);
   const byId = useMemo(() => new Map(nodes.map((node) => [node.id, node])), [nodes]);
   const selected = selectedNodeId ? byId.get(selectedNodeId) : undefined;
   const focus = useMemo(() => mode === "scenario"
@@ -850,15 +899,24 @@ export function GraphCanvas({ mode, graph, events, selectedNodeId, selectedProje
 
   useEffect(() => {
     if (nodes.length === 0) return;
+    if (framedContextRef.current === viewportContext) return;
+    framedContextRef.current = viewportContext;
+    focusedSelectionRef.current = null;
     if (mode === "scenario") {
       setView({ x: Math.min(40, size.width - contentBounds.right - 80), y: 30, scale: 1 });
       return;
     }
     fit();
-  }, [mode, nodes.length, selectedProjectId, size.height, size.width]);
+  }, [contentBounds.right, fit, mode, nodes.length, size.width, viewportContext]);
 
   useEffect(() => {
-    if (!selectedNodeId || !selected || selected.kind === "project") return;
+    if (!selectedNodeId || !selected || selected.kind === "project") {
+      focusedSelectionRef.current = null;
+      return;
+    }
+    const focusKey = `${viewportContext}:${selected.id}`;
+    if (focusedSelectionRef.current === focusKey) return;
+    focusedSelectionRef.current = focusKey;
     const related = nodes.filter((node) => focus.directNodeIds.has(node.id));
     if (related.length === 0) return;
     const relatedBounds = bounds(related);
@@ -873,7 +931,22 @@ export function GraphCanvas({ mode, graph, events, selectedNodeId, selectedProje
       x: leftInset + (availableWidth - focusWidth * scale) / 2 - relatedBounds.left * scale,
       y: (size.height - focusHeight * scale) / 2 - relatedBounds.top * scale
     });
-  }, [focus.directNodeIds, nodes, selected, selectedNodeId, size.height, size.width]);
+  }, [focus.directNodeIds, nodes, selected, selectedNodeId, size.height, size.width, viewportContext]);
+
+  useEffect(() => {
+    if (followContextRef.current !== viewportContext) {
+      followContextRef.current = viewportContext;
+      knownNodeIdsRef.current = new Set(nodes.map((node) => node.id));
+      return;
+    }
+    const known = knownNodeIdsRef.current;
+    const added = nodes.filter((node) => !known.has(node.id));
+    knownNodeIdsRef.current = new Set(nodes.map((node) => node.id));
+    if (mode !== "scenario" || selectedNodeId || added.length === 0) return;
+    const newest = [...added].sort((left, right) => Number(left.data?.order ?? left.event?.seq ?? 0) - Number(right.data?.order ?? right.event?.seq ?? 0)).at(-1);
+    if (!newest) return;
+    setView((current) => followNodeIntoView(current, newest, size));
+  }, [mode, nodes, selectedNodeId, size.height, size.width, viewportContext]);
 
   const zoomAt = useCallback((nextScale: number, screenX = size.width / 2, screenY = size.height / 2) => {
     setView((current) => {
@@ -958,7 +1031,7 @@ export function GraphCanvas({ mode, graph, events, selectedNodeId, selectedProje
           <marker id="graph-arrow-delivery" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M 0 0 L 10 5 L 0 10 z" className="graph-arrow graph-arrow--delivery" /></marker>
         </defs>
         <rect className="graph-hitarea" width={size.width} height={size.height} onDoubleClick={onClearSelection} />
-        <g transform={`translate(${view.x} ${view.y}) scale(${view.scale})`}>
+        <g className="graph-viewport" transform={`translate(${view.x} ${view.y}) scale(${view.scale})`}>
           {(displayGraph.lanes ?? []).map((lane) => {
             const y = lanePositions.get(lane.id) ?? 0;
             return <g key={lane.id} className="workflow-lane"><line x1="50" y1={y} x2={Math.max(contentBounds.right + 150, 1000)} y2={y} /><text x="58" y={y - 58}>{shorten(lane.label, 28)}</text></g>;
@@ -975,7 +1048,7 @@ export function GraphCanvas({ mode, graph, events, selectedNodeId, selectedProje
             const targetDelivery = deliveryEventIds.has(target.event?.id ?? "") || traceNodeIds(target).some((nodeId) => deliveredIds.has(nodeId) || verifiedIds.has(nodeId) || referenceIds.has(nodeId));
             const deliveryPath = deliveryFocus && (deliveryEdgeIds.has(edge.id ?? "") || (sourceDelivery && targetDelivery));
             const focusClass = direct ? "is-focused" : secondary ? "is-secondary" : hasFocus ? "is-muted" : deliveryPath ? "is-delivery" : deliveryFocus ? "is-muted" : "";
-            return <g key={`${edge.source}:${edge.target}:${index}`} className={`graph-edge-group graph-edge-group--${edge.kind} ${focusClass}`}><path d={routed.path} className={`graph-edge ${edge.active ? "is-active" : ""}`} markerEnd={direct ? "url(#graph-arrow-focus)" : deliveryPath ? "url(#graph-arrow-delivery)" : "url(#graph-arrow)"} /><text x={routed.labelX} y={routed.labelY}>{shorten(edge.label, 24)}</text></g>;
+            return <g key={edge.id ?? edgeIdentity(edge)} className={`graph-edge-group graph-edge-group--${edge.kind} ${focusClass}`}><path d={routed.path} className={`graph-edge ${edge.active ? "is-active" : ""}`} markerEnd={direct ? "url(#graph-arrow-focus)" : deliveryPath ? "url(#graph-arrow-delivery)" : "url(#graph-arrow)"} /><text x={routed.labelX} y={routed.labelY}>{shorten(edge.label, 24)}</text></g>;
           })}
           {nodes.map((node) => {
             const nodeIds = traceNodeIds(node);

@@ -4,6 +4,7 @@ import {
   connectedExecutionPath,
   connectedNeighborhood,
   countNodeCollisions,
+  followNodeIntoView,
   lifecycleEvidence,
   layoutDisplayGraph,
   routeDisplayEdge,
@@ -17,6 +18,19 @@ import type { LedgerEvent, PromptCycleRecord, RepositoryGraph } from "../src/typ
 function node(id: string, kind: NonNullable<DisplayNode["kind"]>): DisplayNode {
   return { id, kind, label: id, kicker: kind, status: "planned" };
 }
+
+test("an unfocused live canvas follows appended nodes without resetting zoom", () => {
+  const current = { x: -180, y: 40, scale: 1.65 };
+  const size = { width: 1200, height: 760 };
+  const followed = followNodeIntoView(current, { x: 1200, y: 260 }, size);
+
+  assert.equal(followed.scale, current.scale);
+  assert.notEqual(followed.x, current.x);
+  assert.equal(followed.y, current.y);
+
+  const alreadyVisible = followNodeIntoView(current, { x: 300, y: 260 }, size);
+  assert.equal(alreadyVisible, current);
+});
 
 test("selection focuses direct and second-hop relationships without unrelated nodes", () => {
   const edges: DisplayEdge[] = [

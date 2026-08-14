@@ -9,6 +9,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 ### Changed
 
 - Scenario selection now highlights the complete directed execution path from its cycle and prompt ancestors through every newly appended descendant, while unrelated sibling branches remain muted. Spawn events establish ownership of nested-agent lanes so their live tool and change events remain connected.
+- The dashboard now uses a persistent expandable session tree beside top-level Mental model, Live scenario, Routes, and Evidence tabs, keeping nested prompt, workflow, agent, token, and touched-node context available without crowding the canvas.
+- Live scenario nodes retain their positions as evidence arrives. An unfocused canvas smoothly follows newly appended nodes without changing zoom, while selecting a node pauses auto-follow and preserves the focused path.
 
 ## [0.4.1] - 2026-08-09
 

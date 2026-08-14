@@ -156,6 +156,9 @@ export function DashboardApp(): JSX.Element {
   const [tokenAlarm, setTokenAlarm] = useState<TokenAlarm | null>(null);
   const [showNavigator, setShowNavigator] = useState(() => window.innerWidth > 780);
   const [showDetails, setShowDetails] = useState(() => window.innerWidth > 780);
+  const [expandedSessionIds, setExpandedSessionIds] = useState<Set<string>>(() => new Set());
+  const [expandedCycleIds, setExpandedCycleIds] = useState<Set<string>>(() => new Set());
+  const [pendingLifecycleSelection, setPendingLifecycleSelection] = useState<{ runId: string; kind: LifecycleKind; id: string } | null>(null);
   const [error, setError] = useState<string | null>(null);
   const notifiedKey = useRef<string | null>(null);
 
@@ -176,6 +179,27 @@ export function DashboardApp(): JSX.Element {
   const filteredRoutes = routes.filter((route) => (!selectedProjectId || route.projectId === selectedProjectId) && (!routeQuery || `${route.method} ${route.path} ${route.file}`.toLowerCase().includes(routeQuery.toLowerCase())));
   const warningThreshold = config.tokenMonitoring.sessionWarningTokens;
   const usagePercent = usage ? Math.min(100, (usage.totalTokens / warningThreshold) * 100) : 0;
+
+  useEffect(() => {
+    if (session) setExpandedSessionIds((current) => current.has(session.id) ? current : new Set([...current, session.id]));
+    if (cycle) setExpandedCycleIds((current) => current.has(cycle.id) ? current : new Set([...current, cycle.id]));
+  }, [cycle, session]);
+
+  const toggleSession = (sessionId: string): void => {
+    setExpandedSessionIds((current) => {
+      const next = new Set(current);
+      if (next.has(sessionId)) next.delete(sessionId); else next.add(sessionId);
+      return next;
+    });
+  };
+
+  const toggleCycle = (cycleId: string): void => {
+    setExpandedCycleIds((current) => {
+      const next = new Set(current);
+      if (next.has(cycleId)) next.delete(cycleId); else next.add(cycleId);
+      return next;
+    });
+  };
 
   useEffect(() => {
     setTraceView(delivery ? "delivery" : "exploration");
@@ -379,6 +403,21 @@ export function DashboardApp(): JSX.Element {
     setMode("scenario");
   }, [cycle, inspectNode]);
 
+  const selectLifecycleFromTree = useCallback((runId: string, kind: LifecycleKind, id: string): void => {
+    if (runId === selectedRunId) {
+      inspectLifecycle(kind, id);
+      return;
+    }
+    setPendingLifecycleSelection({ runId, kind, id });
+    setSelectedRunId(runId);
+  }, [inspectLifecycle, selectedRunId]);
+
+  useEffect(() => {
+    if (!pendingLifecycleSelection || !cycle || cycle.runId !== pendingLifecycleSelection.runId) return;
+    inspectLifecycle(pendingLifecycleSelection.kind, pendingLifecycleSelection.id);
+    setPendingLifecycleSelection(null);
+  }, [cycle, inspectLifecycle, pendingLifecycleSelection]);
+
   const clearNodeFocus = useCallback((): void => {
     setSelectedNodeId(null);
     setInspector(DEFAULT_INSPECTOR);
@@ -439,16 +478,50 @@ export function DashboardApp(): JSX.Element {
       </header>
 
       <main className="page">
+        <aside className="session-sidebar" aria-label="Sessions and nested prompt cycles">
+          <div className="session-sidebar__title"><div><p className="eyebrow">Execution history</p><h2>Sessions</h2></div><span>{sessions.length}</span></div>
+          <div className="session-tree">
+            {sessions.length === 0 ? <p className="session-tree__empty">Waiting for an attached agent session.</p> : sessions.map((record, index) => {
+              const sessionOpen = expandedSessionIds.has(record.id);
+              const sessionActive = record.id === session?.id;
+              return <section className={`session-tree__session ${sessionActive ? "is-active" : ""}`} key={record.id}>
+                <div className="session-tree__header">
+                  <button type="button" className="session-tree__toggle" aria-label={`${sessionOpen ? "Collapse" : "Expand"} session ${sessions.length - index}`} aria-expanded={sessionOpen} onClick={() => toggleSession(record.id)}>{sessionOpen ? "−" : "+"}</button>
+                  <button type="button" className="session-tree__select" onClick={() => { const latest = record.cycles.at(-1); if (latest) setSelectedRunId(latest.runId); setExpandedSessionIds((current) => new Set([...current, record.id])); }}><strong>Session {sessions.length - index}</strong><small>{record.provider} · {record.cycles.length} cycle{record.cycles.length === 1 ? "" : "s"}</small></button>
+                </div>
+                {sessionOpen ? <div className="session-tree__cycles">{record.cycles.map((itemCycle) => {
+                  const cycleOpen = expandedCycleIds.has(itemCycle.id);
+                  const cycleActive = itemCycle.runId === selectedRunId;
+                  const cycleEvidence = lifecycleEvidence(itemCycle, "cycle", itemCycle.id);
+                  return <div className={`session-tree__cycle ${cycleActive ? "is-active" : ""}`} key={itemCycle.id}>
+                    <div className="session-tree__cycle-header">
+                      <button type="button" className="session-tree__toggle" aria-label={`${cycleOpen ? "Collapse" : "Expand"} cycle ${itemCycle.ordinal}`} aria-expanded={cycleOpen} onClick={() => toggleCycle(itemCycle.id)}>{cycleOpen ? "−" : "+"}</button>
+                      <button type="button" className="session-tree__cycle-select" onClick={() => { setSelectedRunId(itemCycle.runId); setExpandedCycleIds((current) => new Set([...current, itemCycle.id])); }}><span>Cycle {itemCycle.ordinal}</span><strong>{truncate(itemCycle.prompt, 34)}</strong><small>{itemCycle.status} · {formatTokens(cycleEvidence.tokens)} · {cycleEvidence.touchedNodeIds.length} nodes</small></button>
+                    </div>
+                    {cycleOpen ? <div className="session-tree__nested">
+                      <p>Prompts</p>
+                      {itemCycle.prompts.map((prompt, promptIndex) => { const evidence = lifecycleEvidence(itemCycle, "prompt", prompt.id); const nodeId = lifecycleNodeId("prompt", prompt.id); return <button type="button" className={cycleActive && selectedNodeId === nodeId ? "is-active" : ""} aria-pressed={cycleActive && selectedNodeId === nodeId} key={prompt.id} onClick={() => selectLifecycleFromTree(itemCycle.runId, "prompt", prompt.id)}><i>{promptIndex + 1}</i><span><strong>{truncate(prompt.text, 32)}</strong><small>{prompt.kind} · {prompt.status} · {formatTokens(evidence.tokens)}</small></span></button>; })}
+                      {itemCycle.workflows.length > 0 ? <p>Workflows</p> : null}
+                      {itemCycle.workflows.map((workflow) => { const evidence = lifecycleEvidence(itemCycle, "workflow", workflow.id); const nodeId = lifecycleNodeId("workflow", workflow.id); return <button type="button" className={cycleActive && selectedNodeId === nodeId ? "is-active" : ""} aria-pressed={cycleActive && selectedNodeId === nodeId} key={workflow.id} onClick={() => selectLifecycleFromTree(itemCycle.runId, "workflow", workflow.id)}><i>W</i><span><strong>{truncate(workflow.name, 32)}</strong><small>{workflow.status} · {formatTokens(evidence.tokens)} · {evidence.touchedNodeIds.length} nodes</small></span></button>; })}
+                      {itemCycle.agents.length > 0 ? <p>Agents</p> : null}
+                      {itemCycle.agents.map((agent) => { const evidence = lifecycleEvidence(itemCycle, "agent", agent.id); const nodeId = lifecycleNodeId("agent", agent.id); return <button type="button" className={`${agent.parentAgentRunId ? "is-nested" : ""} ${cycleActive && selectedNodeId === nodeId ? "is-active" : ""}`} aria-pressed={cycleActive && selectedNodeId === nodeId} key={agent.id} onClick={() => selectLifecycleFromTree(itemCycle.runId, "agent", agent.id)}><i>{agent.parentAgentRunId ? "↳" : "A"}</i><span><strong>{truncate(agent.description ?? agent.agentType ?? "Agent", 32)}</strong><small>{agent.status} · {formatTokens(evidence.tokens)} · {evidence.touchedNodeIds.length} nodes</small></span></button>; })}
+                    </div> : null}
+                  </div>;
+                })}</div> : null}
+              </section>;
+            })}
+          </div>
+        </aside>
+
+        <section className="main-stage">
+        <nav className="view-tabs" aria-label="View modes">
+          {([ ["model", "Mental model"], ["scenario", "Live scenario"], ["routes", `Routes ${routes.length}`], ["proof", "Evidence"] ] as const).map(([value, label]) => <button key={value} type="button" className={mode === value ? "is-active" : ""} onClick={() => setMode(value)}>{label}</button>)}
+        </nav>
         {error ? <div className="error-banner" role="alert">Dashboard error: {error}</div> : null}
         <section className="task-summary" aria-labelledby="task-heading">
           <div><p className="eyebrow">{session ? `${session.provider} session · cycle ${cycle?.ordinal ?? 1}` : "Live agent session"}</p><h1 id="task-heading">{run?.prompt ?? "Waiting for a recorded task"}</h1><p className="task-summary__meta">{run ? `${run.id} · started ${formatTime(run.createdAt)} · ${displayedRun?.status ?? run.status}` : "Attach an agent session to activate the project model."}</p></div>
           <div className="proof-score" aria-label={`${passedChecks} of ${checks.length} proof checks passed`}><span>{passedChecks}/{checks.length}</span><small>proof checks</small></div>
         </section>
-
-        {sessions.length > 0 ? <section className="session-ledger" aria-label="Recorded agent sessions and prompt cycles">
-          <div className="session-ledger__sessions"><span className="eyebrow">Sessions</span>{sessions.map((item, index) => <button key={item.id} type="button" className={item.id === session?.id ? "is-active" : ""} onClick={() => { const latest = item.cycles.at(-1); if (latest) setSelectedRunId(latest.runId); }}><strong>Session {sessions.length - index}</strong><small>{item.provider} · {item.cycles.length} cycle{item.cycles.length === 1 ? "" : "s"}</small></button>)}</div>
-          {session ? <div className="session-ledger__cycles"><span className="eyebrow">Prompt cycles</span>{session.cycles.map((item) => <button key={item.id} type="button" className={item.runId === selectedRunId ? "is-active" : ""} onClick={() => setSelectedRunId(item.runId)}><span>Cycle {item.ordinal}</span><strong>{truncate(item.prompt, 38)}</strong><small>{item.prompts.length} prompts · {item.agents.length} agents · {item.status}</small></button>)}</div> : null}
-        </section> : null}
 
         <section className={`usage-strip ${usage?.warning ? "usage-strip--warning" : ""}`} aria-label="Agent token usage">
           <div className="usage-strip__summary"><p className="eyebrow">Session tokens</p><strong>{usage ? formatTokens(usage.totalTokens) : "—"}</strong><span>{usage ? `${Math.round(usagePercent)}% of ${formatTokens(warningThreshold)} warning level` : "Waiting for Claude usage evidence"}</span></div>
@@ -478,16 +551,12 @@ export function DashboardApp(): JSX.Element {
           <div className="delivery-ledger__contract"><span className={delivery?.compliance.missingSkills.length || delivery?.compliance.missingHooks.length ? "is-missed" : ""}>{delivery ? `${delivery.compliance.missingSkills.length + delivery.compliance.missingHooks.length} missed workflow requirements` : `${cycle.skills.length} skills · ${cycle.hooks.length} hooks observed`}</span><small>{delivery ? `${formatTokens(delivery.allocatedTokens)} attributed · ${formatTokens(delivery.unallocatedTokens)} unallocated tokens` : "Final roles are assigned when the prompt cycle stops"}</small></div>
         </section> : null}
 
-        <nav className="view-tabs" aria-label="Repository views">
-          {([ ["model", "Mental model"], ["scenario", "Live scenario"], ["routes", `Routes ${routes.length}`], ["proof", "Evidence"] ] as const).map(([value, label]) => <button key={value} type="button" className={mode === value ? "is-active" : ""} onClick={() => setMode(value)}>{label}</button>)}
-        </nav>
-
         <div className="scope-tabs" aria-label="Project scope">
           <button type="button" className={!selectedProjectId ? "is-active" : ""} onClick={() => selectProject(null)}>Whole repository</button>
           {projects.filter((project) => project.path !== ".").map((project) => <button key={project.id} type="button" className={selectedProjectId === project.id ? "is-active" : ""} onClick={() => selectProject(project.id)}>{project.name}<span>{project.stats.routes}</span></button>)}
         </div>
 
-        <div className={`workspace workspace--model ${showNavigator ? "" : "workspace--navigator-hidden"} ${showDetails ? "" : "workspace--detail-hidden"}`}>
+        <div className={`workspace workspace--${mode} ${showNavigator ? "" : "workspace--navigator-hidden"} ${showDetails ? "" : "workspace--detail-hidden"}`}>
           <Panel className={`navigator-panel overlay-panel ${showNavigator ? "" : "is-hidden"}`} aria-labelledby="navigator-heading">
             {mode === "proof" ? (
               <><PanelHeader eyebrow="Append-only ledger" title="Execution" titleId="navigator-heading" action={<span className="event-count">{visibleEvents.length}</span>} /><ol className="timeline">{[...visibleEvents].reverse().map((event) => <li key={event.id} className={`timeline__item timeline__item--${event.status}`}><button type="button" onClick={() => inspectEvent(event)}><strong>{EVENT_LABELS[event.type] ?? event.type}</strong><span>{formatTime(event.timestamp)} · {truncate(eventDetail(event), 34)}</span></button></li>)}</ol></>
@@ -512,7 +581,7 @@ export function DashboardApp(): JSX.Element {
           <Panel className="graph-panel" aria-labelledby="graph-heading">
             <div className="graph-toolbar">
               <div><p className="eyebrow">{mode === "model" ? "System architecture" : mode === "scenario" ? "Activated path" : mode === "routes" ? "Interface map" : "Completion contract"}</p><h2 id="graph-heading">{mode === "model" ? (selectedProjectId ? "Project mental model" : "Whole-project mental model") : mode === "scenario" ? "Live project scenario" : mode === "routes" ? "Routes and handlers" : "Proof graph"}</h2></div>
-              <div className="canvas-panels" aria-label="Canvas panels"><button type="button" className={showNavigator ? "is-active" : ""} onClick={() => setShowNavigator((value) => !value)}>{mode === "scenario" ? "Session" : "Projects"}</button><button type="button" className={showDetails ? "is-active" : ""} onClick={() => setShowDetails((value) => !value)}>Details</button>{delivery ? <><button type="button" className={traceView === "exploration" ? "is-active" : ""} onClick={() => setTraceView("exploration")}>Touched</button><button type="button" className={traceView === "delivery" ? "is-active" : ""} onClick={() => setTraceView("delivery")}>Delivered</button></> : null}</div>
+              <div className="canvas-panels" aria-label="Canvas panels">{mode !== "scenario" ? <button type="button" className={showNavigator ? "is-active" : ""} onClick={() => setShowNavigator((value) => !value)}>Navigator</button> : null}<button type="button" className={showDetails ? "is-active" : ""} onClick={() => setShowDetails((value) => !value)}>Details</button>{delivery ? <><button type="button" className={traceView === "exploration" ? "is-active" : ""} onClick={() => setTraceView("exploration")}>Touched</button><button type="button" className={traceView === "delivery" ? "is-active" : ""} onClick={() => setTraceView("delivery")}>Delivered</button></> : null}</div>
               {selectedProjectId ? <Button variant="ghost" size="small" onClick={() => selectProject(null)}>← Whole repository</Button> : null}
               <Button variant="secondary" size="small" busy={replaying} leadingIcon={<PlayIcon />} onClick={() => { setMode("scenario"); setReplayCount(0); }} disabled={events.length === 0}>{replaying ? "Replaying" : "Replay run"}</Button>
             </div>
@@ -528,6 +597,7 @@ export function DashboardApp(): JSX.Element {
             <div className="model-note"><p className="eyebrow">Inference policy</p><p>Explicit syntax is high confidence. Unique symbol matches are medium confidence. Every inferred edge carries its reason so a reviewer can challenge it.</p></div>
           </Panel>
         </div>
+        </section>
       </main>
       <footer className="footer"><span>Proof &amp; Replay</span><span>Created by Kundan Ray · <a href="mailto:raykundan57@gmail.com">raykundan57@gmail.com</a></span></footer>
     </div>
